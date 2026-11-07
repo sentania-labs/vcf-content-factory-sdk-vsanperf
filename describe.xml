@@ -91,8 +91,9 @@
 		</ResourceKind>
 
 		<!-- Build 7: the per-instance object the cycle runs for. Identity
-		     is the account's own (vCenter Server, Clusters to include as
-		     normalised items or *), known without a login, so it exists
+		     is the account's own (vCenter Server and Clusters to include
+		     exactly as stored, trimmed only, * when empty; build 8),
+		     known without a login, so it exists
 		     while vCenter is unreachable. No metrics: the self-metrics stay
 		     on the adapter instance. -->
 		<ResourceKind key="VsanPerfCollector" nameKey="40" type="1">

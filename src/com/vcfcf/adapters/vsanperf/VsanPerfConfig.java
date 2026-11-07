@@ -77,13 +77,15 @@ final class VsanPerfConfig {
     }
 
     /**
-     * The collector object's {@code cluster_scope} identifier: the include
-     * list as normalised items ({@code a,b}), or {@code *} for every cluster.
-     * Never empty, so the identifier always has a value.
+     * The collector object's {@code cluster_scope} identifier: Clusters to
+     * include exactly as the account stores it, trimmed only, or {@code *}
+     * when empty (never empty, so the identifier always has a value). Not
+     * normalised (build 8): the account's identity is the raw string, so
+     * {@code "cl01,cl02"} and {@code "cl01, cl02"} are two accounts and must
+     * be two objects. Normalisation is for the filter only ({@link #filter}).
      */
     String clusterScope() {
-        java.util.List<String> items = ClusterFilter.items(clusterInclude);
-        return items.isEmpty() ? "*" : String.join(",", items);
+        return clusterInclude.isEmpty() ? "*" : clusterInclude;
     }
 
     ClusterFilter filter() {

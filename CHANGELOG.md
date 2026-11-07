@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.0.8 (Unreleased)
+
+- fix(adapter): build 8, the `VsanPerfCollector` identity is exactly what the
+  account stores, trimmed only: `vcenter` = vCenter Server (was
+  lower-cased), `cluster_scope` = Clusters to include, `*` when empty (was
+  split, trimmed per item and de-duplicated). The account's identity is the
+  raw strings, so two accounts differing only in case or spacing
+  ("vc.lab" / "VC.lab", "cl01,cl02" / "cl01, cl02") were distinct accounts
+  enumerating the same object key, and one instance got an object it did not
+  own. Normalisation stays in the cluster filter only. ConfigTest covers
+  both cases and that the filter still normalises; REFERENCE.md, the README
+  identity note and the describe.xml comment say so. Not yet tagged, so no
+  object exists under the build 7 key outside dev installs.
+
 ## 0.1.0.7 (Unreleased)
 
 - fix(adapter): build 7, the cycle runs in `collect()` so an unreachable

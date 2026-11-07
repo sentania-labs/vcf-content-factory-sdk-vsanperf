@@ -29,8 +29,19 @@ public final class ConfigTest {
         T.eq(null, VsanPerfConfig.rootUrl("https://x/"), "invalid check url");
         T.check(!d.toString().contains("s3cret"), "toString has no password");
         T.eq("*", d.clusterScope(), "collector scope: every cluster");
-        T.eq("Prod,domain-c9", new VsanPerfConfig("vc", "u", "p", " Prod , domain-c9,Prod ", "",
-                null, null, null, null).clusterScope(), "collector scope: normalised items");
+        // Build 8: the collector identity is what the account stores, trimmed only.
+        T.eq("Prod , domain-c9,Prod", new VsanPerfConfig("vc", "u", "p", " Prod , domain-c9,Prod ",
+                "", null, null, null, null).clusterScope(), "collector scope: trimmed only");
+        T.check(!new VsanPerfConfig("vc", "u", "p", "cl01,cl02", "", null, null, null, null)
+                .clusterScope().equals(new VsanPerfConfig("vc", "u", "p", "cl01, cl02", "", null,
+                        null, null, null).clusterScope()), "accounts differing in spacing: two objects");
+        T.eq("VC.lab", cfg(" VC.lab ", null, null, null, null).vcenterHost,
+                "vcenter identity keeps case, trimmed");
+        T.check(!cfg("vc.lab", null, null, null, null).vcenterHost
+                .equals(cfg("VC.lab", null, null, null, null).vcenterHost),
+                "accounts differing in case: two objects");
+        T.check(new VsanPerfConfig("vc", "u", "p", "cl01, cl02", "", null, null, null, null).filter()
+                .accepts("domain-c1", "CL02"), "the filter still normalises");
         T.check(!d.toString().contains("svc@"), "toString has no principal");
 
         for (String bad : new String[] {"", "https://vc", "u:pw@vc", "vc/path", "vc:0", "vc:x",

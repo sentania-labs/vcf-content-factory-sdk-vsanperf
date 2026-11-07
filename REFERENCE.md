@@ -1,6 +1,6 @@
 # VCF Content Factory vSAN Performance: Reference
 
-Build 0.1.0.7 (Build 1 of the design). Design: the factory's
+Build 0.1.0.8 (Build 1 of the design). Design: the factory's
 `knowledge/designs/vsanperf-mp-v1.md`.
 
 ## Adapter
@@ -10,7 +10,7 @@ Build 0.1.0.7 (Build 1 of the design). Design: the factory's
 | Adapter kind | `vcfcf_vsanperf` |
 | Tier | 2 (Java SDK) |
 | Monitoring interval | 5 minutes (the Performance Service's native 300 s bucket) |
-| Objects created | the adapter instance, and one "VCF Content Factory vSAN Performance Collector" (`VsanPerfCollector`, identifiers `vcenter` and `cluster_scope`) per instance, which the cycle runs for |
+| Objects created | the adapter instance, and one "VCF Content Factory vSAN Performance Collector" (`VsanPerfCollector`) per instance, which the cycle runs for. Identifiers: `vcenter` = vCenter Server and `cluster_scope` = Clusters to include (`*` when empty), exactly as the account stores them, trimmed only; two accounts that differ only in case or spacing are two accounts and get two objects |
 | License required | No |
 
 ### Credentials (`vcenter_credentials`)
