@@ -120,6 +120,8 @@ public final class EngineTest {
         final Map<String, Map<String, Double>> pushed = new ConcurrentHashMap<>();
         final AtomicInteger values = new AtomicInteger();
         volatile boolean clean = true;
+        /** Fail only this pushStats call (0-based), -1 for none (build 15). */
+        volatile int failCall = -1;
         /** One entry per pushStats call: its timestamp and what it carried. */
         final List<Map.Entry<Long, Map<String, Map<String, Double>>>> calls =
                 Collections.synchronizedList(new ArrayList<>());
@@ -167,7 +169,8 @@ public final class EngineTest {
                 }
             }
             values.addAndGet(n);
-            return clean ? new CycleEngine.PushOutcome(n, 1, 0, true)
+            boolean ok = clean && calls.size() - 1 != failCall;
+            return ok ? new CycleEngine.PushOutcome(n, 1, 0, true)
                     : new CycleEngine.PushOutcome(n, 0, 1, false);
         }
     }
@@ -222,6 +225,7 @@ public final class EngineTest {
         mixedTimestampRows();
         labelLagsWithinEntity();
         capsWithinTimeGroup();
+        failedMiddleBatchOnly();
         noStarvationBehindSlowCluster();
         loginFailsCollectThrows();
         summaryAndPerfLinesEveryCycle();
@@ -701,6 +705,89 @@ public final class EngineTest {
             if (c.getKey() == at("02:30:00")) t0230calls++;
         }
         T.eq(2, t0230calls, "the 02:30 group split in two calls");
+    }
+
+    /**
+     * Builds 15 and 16: marks are committed per push call. 150 hosts, two
+     * buckets (02:25, 02:30): four calls (02:25 x 100, 02:30 x 100, then
+     * 02:25 x 50, 02:30 x 50). Each call in turn fails (review W1: calls 0
+     * and 2 carry the older bucket, whose newer bucket is pushed clean). The
+     * next cycle re-sends every failed value; the only other values re-sent
+     * are the newer bucket of a failed (entity, label), with the same value
+     * (it lands on itself); the cycle after that sends nothing. Constructed
+     * bodies.
+     */
+    static void failedMiddleBatchOnly() throws Exception {
+        for (int fail = 0; fail < 4; fail++) failedCall(fail);
+    }
+
+    static void failedCall(int fail) throws Exception {
+        List<Inventory.Host> hosts = new ArrayList<>();
+        StringBuilder body = new StringBuilder("[");
+        for (int i = 0; i < 150; i++) {
+            hosts.add(new Inventory.Host("host-s" + i, "s" + i, "node-s" + i, "U", true));
+            if (i > 0) body.append(',');
+            body.append(entity("node-s" + i, "02:25:00,02:30:00", "1," + i));
+        }
+        FakeVc vc = new FakeVc();
+        vc.inventory = new Inventory(List.of(new Inventory.Cluster("domain-c50", "big", hosts)));
+        vc.answers.put("domain-c50|host-domclient", body.append(']').toString());
+        FakeOps ops = labOps(vc.inventory);
+        ops.failCall = fail;
+        CycleEngine e = engine(vc, ops, 1, 30_000, new T.RecLog(), "");
+        CycleEngine.Result r1 = e.run(in(30_000));
+        String w = "failCall=" + fail + ": ";
+        T.eq(300, r1.seriesPushed, w + "all values handed to the push");
+        T.eq(4, ops.calls.size(), w + "four push calls");
+        Map.Entry<Long, Map<String, Map<String, Double>>> failed = ops.calls.get(fail);
+        long failedTs = failed.getKey();
+        java.util.Set<String> failedValues = new java.util.HashSet<>();
+        for (Map.Entry<String, Map<String, Double>> r : failed.getValue().entrySet()) {
+            for (Map.Entry<String, Double> k : r.getValue().entrySet()) {
+                failedValues.add(r.getKey() + "|" + k.getKey() + "@" + failedTs + "=" + k.getValue());
+            }
+        }
+        java.util.Map<String, Double> landed = new java.util.HashMap<>();
+        for (int i = 0; i < ops.calls.size(); i++) {
+            if (i == fail) continue;
+            Map.Entry<Long, Map<String, Map<String, Double>>> c = ops.calls.get(i);
+            for (Map.Entry<String, Map<String, Double>> r : c.getValue().entrySet()) {
+                for (Map.Entry<String, Double> k : r.getValue().entrySet()) {
+                    landed.put(r.getKey() + "|" + k.getKey() + "@" + c.getKey(), k.getValue());
+                }
+            }
+        }
+        ops.failCall = -1;
+        ops.calls.clear();
+        CycleEngine.Result r2 = e.run(in(30_000));
+        java.util.Set<String> resent = new java.util.HashSet<>();
+        for (Map.Entry<Long, Map<String, Map<String, Double>>> c : ops.calls) {
+            for (Map.Entry<String, Map<String, Double>> r : c.getValue().entrySet()) {
+                for (Map.Entry<String, Double> k : r.getValue().entrySet()) {
+                    String v = r.getKey() + "|" + k.getKey() + "@" + c.getKey();
+                    if (failedValues.contains(v + "=" + k.getValue())) {
+                        resent.add(v + "=" + k.getValue());
+                        continue;
+                    }
+                    // Otherwise: the newer bucket of a failed label, re-sent unchanged.
+                    T.check(c.getKey() > failedTs, w + "an extra value only for a newer bucket: " + v);
+                    T.check(containsLabel(failedValues, r.getKey() + "|" + k.getKey() + "@"
+                            + failedTs), w + "of a failed label: " + v);
+                    T.eq(landed.get(v), k.getValue(), w + "the same value as landed: " + v);
+                }
+            }
+        }
+        T.eq(failedValues.size(), resent.size(), w + "every failed value is sent again");
+        T.eq(failedValues.size() + (fail % 2 == 0 ? failedValues.size() : 0), r2.seriesPushed,
+                w + (fail % 2 == 0 ? "the failed older buckets and their newer buckets"
+                        : "only the failed values"));
+        CycleEngine.Result r3 = e.run(in(30_000));
+        T.eq(0, r3.seriesPushed, w + "all marked now");
+    }
+
+    static boolean containsLabel(java.util.Set<String> values, String prefix) {
+        for (String v : values) if (v.startsWith(prefix + "=")) return true;
+        return false;
     }
 
     static void filterAndNonVsan() throws Exception {

@@ -201,14 +201,50 @@ rendering of `pNIC:vmnic1` (needs a logged-in browser) and check 4's
 collector log scan (needs a Cloud Proxy login). Neither credential is in
 the lab profile.
 
-## Open before the scale release (issue #6)
+## Scale verification (issue #6)
 
-- **Design T3, replay harness:** recorded per-type responses replayed per
-  synthetic cluster with per-call latency and both call-ceiling models.
-  Not built.
-- **Design T4, heap budget gate:** 70 synthetic clusters x 6 hosts x 2 NICs
-  must stay under the 65 MB per-instance budget (design D6) inside the
-  cycle deadline. Not built; nothing yet verifies the scale claim.
+**Delivered (builds 14 to 16): design T3 and T4**, in simulated time against
+the verbatim captures (`tests/.../ReplayHarness.java`, gate
+`ReplayBudgetTest`, run by `ci/run_java_tests.sh`; standalone
+`ci/replay.sh` takes the arguments listed in the harness's class doc, for
+example `ci/replay.sh --clusters 70 --model vcenter --cycles 7`). 70 clusters
+x 6 hosts x 2 pNICs, 4 workers, 0.19 s per call. Every row is asserted in
+CI unless marked "recorded":
+
+| Case (assertions) | Cycles 1 to 3 | Steady | Series per cycle | Peak heap delta (retained) |
+|---|---|---|---|---|
+| (a) default tiers, 7 calls/s per vCenter (deadline path on cycles 1 to 3; every cluster done and perf phase < 240 s from cycle 4; 98,350 series; 1,610 calls at cycle 7; heap < 65 MB and < 15 MB) | 1,664 to 1,681 calls in 240 s, 61 to 64 of 70 clusters done (varies run to run) | cycle 4: 1,628 to 1,640 calls, 232.9 to 234.6 s (about 5 s under the 240 s assertion); cycle 7: 1,610 calls, 230.3 s | 98,350 | 5 to 7 MB (1.8 MB); build 14: 16.8 MB |
+| (a') default tiers, 7 calls/s per cluster (all done; 88.9 s then 78.7 s within 2 s) | 1,820 calls, 88.9 s | 1,610 calls, 78.7 s | 98,350 | recorded only |
+| (b) all tiers, VM N = 3, per vCenter (deadline path taken; heap < 65 MB, < 50 MB, retained < 35 MB) | ~1,630 calls in 240 s, 52 to 60 clusters done | same | up to ~715,000 values | 32.7 MB (26.5 MB) |
+| (b') all tiers, VM N = 3, per cluster (every cluster done every cycle; same heap limits) | 2,148 to 2,190 calls, 116 to 127 s | 1,822 calls, 107 s | up to ~970,000 values | 33.8 MB (28.0 MB) |
+| (c) all tiers, VM N = 1, per vCenter (heap only, same limits) | ~1,600 calls, 48 of 70 done | same | up to ~1.5 million values | 37.5 MB (27.2 MB) |
+
+Before build 15 the VM cases peaked at 70.8 to 76.6 MB. Heap: used heap
+after `System.gc()`, sampled every 150 ms of wall time during each cycle,
+minus a baseline taken before the engine exists; about 1 MB of noise, and a
+10 ms sampler reads 2 to 5 MB higher on the VM cases. The 15 MB, 50 MB and
+35 MB ceilings sit at about twice the current readings so a regression
+fails on its own, well before the 65 MB budget. Cycles run paced (each call
+also waits its simulated latency / 20, VM cases / 40, of wall time) so the
+result queue behaves as in production. The figures vary from run to run
+because thread scheduling decides which worker takes which cluster.
+
+**Push time (recorded, not asserted).** The recording stitcher builds each
+push body and models the call at 9 ms per resource (the lab's one
+measurement: 45 ms for a 5-host batch, extrapolated linearly). Default
+tiers: ~6 s of pushes per cycle (11 s on the cold start). With the VM tier
+on: ~120 to 400 s per cycle at N = 3 and up to ~650 s at N = 1. The
+production caller pushes on the same thread that drains the results, so if
+large batches really cost that much, push time, not perf calls, bounds the
+VM tier's cycle. One live `PERF push` reading of a 100-resource batch
+settles it.
+
+**Still open:**
+- **The vSAN Performance Service's call ceiling** (per vCenter or per
+  cluster, design D9). The harness models both; which one a real vCenter
+  has decides whether the default tiers fit a 5-minute cycle at 70 clusters
+  (230 s under the per-vCenter model, 79 s under the per-cluster one). Read
+  it from `PERF cycle` on a multi-cluster vCenter with timing logging on.
 - The platform acceptance above (design T5).
 
 ## Migrating from the Python vsanhostmetrics pack

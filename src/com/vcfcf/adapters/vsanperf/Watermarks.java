@@ -15,7 +15,8 @@ import java.util.Arrays;
  * while another label has it. With a coarser mark, the first label moving
  * the mark to bucket T would make the second label's T value, arriving next
  * cycle, look old and be skipped for good. A mark is recorded only after
- * every push of the cycle came back clean (review N5).
+ * the push call that carried the value came back clean (review N5; per push
+ * call since build 15, see {@link Pending}).
  *
  * <p><b>Compact scheme (v2 "Heap", requirement 1).</b> Build 1 kept one
  * {@code String} key and a boxed {@code Long} per label (~160 B each, ~16 MB
@@ -130,6 +131,22 @@ final class Watermarks {
         } else if (mark > m[position]) {
             m[position] = mark;
         }
+    }
+
+    /**
+     * Lower one label's mark to {@code ts} if it is at or above it (build 16,
+     * review W1): a failed older bucket must not stay hidden behind a newer
+     * bucket of the same (entity, label) that was pushed clean. Never raises
+     * a mark and never creates one.
+     */
+    void lower(long entity, int width, int position, long ts) {
+        int mark = toMark(ts);
+        if (mark == NONE) return;
+        int i = slot(entity);
+        if (keys[i] == 0) return;
+        int[] m = vals[i];
+        if (m.length != width || position < 0 || position >= width) return;
+        if (m[position] != NONE && m[position] > mark) m[position] = mark;
     }
 
     private static int used(int[] m) {
@@ -251,52 +268,68 @@ final class Watermarks {
     }
 
     // ------------------------------------------------------------------
-    // Pending marks of one cycle
+    // Pending marks of one push group
     // ------------------------------------------------------------------
 
     /**
-     * Marks of the values buffered this cycle, committed only if every push
-     * of the cycle was clean (review N5). Primitive arrays: at the example
-     * one cycle buffers ~98,000 values.
+     * Marks of the values buffered in one push group (one target kind, one
+     * sample time), committed only when that group's push came back clean;
+     * a failed batch leaves its marks uncommitted and, at the end of the
+     * cycle, lowers any newer mark of the same (entity, label) below its
+     * time ({@link #lowerIn}, build 16), so its buckets are sent again next
+     * cycle while still in the window (build 15; until build 14
+     * the marks of the whole cycle waited for every push to be clean, which
+     * held ~24 B per pushed value for the cycle: ~25 MB on a VM-tier cycle at
+     * the 70-cluster example). The group's one sample time is held once; an
+     * entry is the entity hash and the catalog position and width packed in
+     * one int: 12 B, in arrays sized from the previous cycle's largest group.
      */
     static final class Pending {
-        private long[] entity = new long[256];
-        private int[] width = new int[256];
-        private int[] position = new int[256];
-        private long[] time = new long[256];
+        final long time;
+        private long[] entity;
+        private int[] packed;
         private int n;
 
-        void add(long e, int w, int p, long ts) {
+        Pending(long time, int capacity) {
+            this.time = time;
+            int c = Math.max(16, capacity);
+            entity = new long[c];
+            packed = new int[c];
+        }
+
+        /** {@code position} and {@code width} below 65,536 (catalog widths are at most 82). */
+        void add(long e, int width, int position) {
             if (n == entity.length) {
                 int c = n * 2;
                 entity = Arrays.copyOf(entity, c);
-                width = Arrays.copyOf(width, c);
-                position = Arrays.copyOf(position, c);
-                time = Arrays.copyOf(time, c);
+                packed = Arrays.copyOf(packed, c);
             }
             entity[n] = e;
-            width[n] = w;
-            position[n] = p;
-            time[n] = ts;
+            packed[n] = (position << 16) | (width & 0xffff);
             n++;
         }
 
         void commitTo(Watermarks marks) {
-            for (int i = 0; i < n; i++) marks.record(entity[i], width[i], position[i], time[i]);
+            for (int i = 0; i < n; i++) {
+                marks.record(entity[i], packed[i] & 0xffff, packed[i] >>> 16, time);
+            }
+        }
+
+        /**
+         * After every group of the cycle is pushed: for a group whose push
+         * failed, lower each of its (entity, label) marks below this sample
+         * time, so the failed bucket is sent again next cycle even when a
+         * newer bucket of the same label was pushed clean (that newer bucket
+         * is then sent again too, landing on itself).
+         */
+        void lowerIn(Watermarks marks) {
+            for (int i = 0; i < n; i++) {
+                marks.lower(entity[i], packed[i] & 0xffff, packed[i] >>> 16, time - 1000);
+            }
         }
 
         int size() {
             return n;
-        }
-
-        void clear() {
-            n = 0;
-            if (entity.length > 4096) {
-                entity = new long[256];
-                width = new int[256];
-                position = new int[256];
-                time = new long[256];
-            }
         }
     }
 }

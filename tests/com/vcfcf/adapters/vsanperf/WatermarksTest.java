@@ -54,14 +54,41 @@ public final class WatermarksTest {
         w.prune(T5 + 24 * 3_600_000L + 1000);
         T.eq(Long.MIN_VALUE, w.last(a, 0), "old label dropped");
         T.eq(T5 + 24 * 3_600_000L, w.last(a, 1), "recent label kept");
-        // Pending marks commit as a batch.
-        Watermarks.Pending p = new Watermarks.Pending();
-        for (int i = 0; i < 1000; i++) p.add(Watermarks.hash("e" + i), 4, i % 4, T5);
-        p.commitTo(w);
-        T.eq(1000, w.entities() - 1, "1000 more entities");
-        T.eq(T5, w.last(Watermarks.hash("e999"), 3), "committed");
-        p.clear();
-        T.eq(0, p.size(), "cleared");
+        // Build 15: pending marks per push group (one sample time), committed
+        // per group; a group that is not committed leaves only its marks unset.
+        Watermarks.Pending g1 = new Watermarks.Pending(T5, 4);
+        Watermarks.Pending g2 = new Watermarks.Pending(T5 + 300_000, 4);
+        Watermarks.Pending g3 = new Watermarks.Pending(T5 + 600_000, 4);
+        for (int i = 0; i < 1000; i++) {
+            long e = Watermarks.hash("e" + i);
+            g1.add(e, 4, i % 4);
+            g2.add(e, 4, (i + 1) % 4);
+            g3.add(Watermarks.hash("f" + i), 82, 81); // another type's entities (width 82)
+        }
+        T.eq(1000, g1.size(), "grown past its preallocation");
+        g1.commitTo(w);
+        // g2 "failed": not committed.
+        g3.commitTo(w);
+        T.eq(T5, w.last(Watermarks.hash("e999"), 3), "group 1 committed");
+        T.eq(Long.MIN_VALUE, w.last(Watermarks.hash("e998"), 3), "e998's position 3 came only from "
+                + "group 2 (not committed): unset");
+        T.eq(T5 + 600_000, w.last(Watermarks.hash("f7"), 81), "group 3 committed, width 82 position 81");
+        T.eq(2000, w.entities() - 1, "2000 more entities");
+        // Build 16 (review W1): an uncommitted older group lowers the newer mark.
+        long x = Watermarks.hash("x");
+        Watermarks.Pending older = new Watermarks.Pending(T5, 4);
+        Watermarks.Pending newer = new Watermarks.Pending(T5 + 300_000, 4);
+        older.add(x, 4, 2);
+        newer.add(x, 4, 2);
+        newer.commitTo(w);
+        T.eq(T5 + 300_000, w.last(x, 2), "newer bucket marked");
+        older.lowerIn(w);
+        T.eq(T5 - 1000, w.last(x, 2), "lowered below the failed older bucket");
+        T.check(T5 > w.last(x, 2), "so the older bucket is newer than the mark: sent again");
+        w.lower(x, 4, 2, T5 + 600_000);
+        T.eq(T5 - 1000, w.last(x, 2), "lower never raises");
+        w.lower(Watermarks.hash("absent"), 4, 0, T5);
+        T.eq(Long.MIN_VALUE, w.last(Watermarks.hash("absent"), 0), "lower never creates");
         w.clear();
         T.eq(0, w.size(), "clear");
     }

@@ -181,10 +181,13 @@ permanent once data exists.
 
 Each push call carries one timestamp, so values are grouped by target kind
 and sample time first, then sent in batches of up to 100 resources and about
-1 MB per time. A bucket is marked as pushed only when every push of the
-cycle came back clean; after a failed batch the next cycle sends the same
-buckets again while they are still in the 7-minute window (a value that did
-land is overwritten with itself).
+1 MB per time. A bucket is marked as pushed only when the push call that
+carried it came back clean (since build 15 per call; before, only when every
+push of the cycle was clean). After a failed call the next cycle sends that
+call's buckets again while they are still in the 7-minute window. If a newer
+bucket of the same entity and metric was pushed clean in the same cycle, it
+is sent again too (since build 16; it lands on itself), because one mark per
+entity and metric cannot otherwise remember the older failed bucket.
 
 ## Keys on VMWARE HostSystem: core (always on)
 

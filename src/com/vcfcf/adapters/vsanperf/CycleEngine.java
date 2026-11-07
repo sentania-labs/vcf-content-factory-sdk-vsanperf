@@ -956,7 +956,7 @@ final class CycleEngine {
         }
         pool.shutdown();
 
-        PushBuffer buf = new PushBuffer();
+        PushBuffer buf = new PushBuffer(lastLargestGroup);
         Set<String> done = new HashSet<>();
         Set<String> unresolvedNodes = new TreeSet<>();
         Set<String> missed = new TreeSet<>();
@@ -1118,11 +1118,11 @@ final class CycleEngine {
                         res.duplicatesSkipped++;
                         continue;
                     }
-                    Long full = buf.add(er.kind, er.resourceId, er.keys.get(i), ts,
+                    PushBuffer.Group g = buf.add(er.kind, er.resourceId, er.keys.get(i), ts,
                             er.values.get(i), er.tier);
-                    if (full != null) pushGroup(id, buf, er.kind, full, res, pushMs);
-                    // Review N5: recorded only once the pushes are known clean (flush).
-                    buf.pendingMarks.add(er.mark, er.width, pos, ts);
+                    // Committed only when this group's push comes back clean (build 15).
+                    g.pending.add(er.mark, er.width, pos);
+                    if (g.full()) pushGroup(id, buf, er.kind, ts, res, pushMs);
                 }
             }
             return 0;
@@ -1866,27 +1866,46 @@ final class CycleEngine {
         static final class Group {
             final Map<String, Map<String, Double>> byResource = new LinkedHashMap<>();
             final int[] byTier = new int[TIERS];
+            /** This group's dedup marks; committed if its push is clean (build 15). */
+            final Watermarks.Pending pending;
             long bytes;
             int values;
+
+            Group(long ts, int capacity) {
+                pending = new Watermarks.Pending(ts, capacity);
+            }
+
+            boolean full() {
+                return byResource.size() >= PUSH_RESOURCES || bytes >= PUSH_BYTES;
+            }
         }
 
         /** Kind, then sample time. */
         final Map<String, TreeMap<Long, Group>> byKind = new TreeMap<>();
-        /** Dedup marks of every value buffered this cycle; committed at the end if all pushes were clean. */
-        final Watermarks.Pending pendingMarks = new Watermarks.Pending();
-        boolean allClean = true;
+        /** Pending-array size for a new group: the previous cycle's largest group. */
+        final int groupCapacity;
+        /** Marks of groups whose push failed: lowered at the end of the flush (build 16). */
+        final List<Watermarks.Pending> failed = new ArrayList<>();
+        int largestGroup;
 
-        /** @return the group's time when it reached a cap, else {@code null} */
-        Long add(String kind, String rid, String key, long ts, double v, EntityType.Tier tier) {
+        PushBuffer(int groupCapacity) {
+            this.groupCapacity = groupCapacity;
+        }
+
+        /** Buffer one value; returns its group (push it when {@link Group#full()}). */
+        Group add(String kind, String rid, String key, long ts, double v, EntityType.Tier tier) {
             Group g = byKind.computeIfAbsent(kind, k -> new TreeMap<>())
-                    .computeIfAbsent(ts, k -> new Group());
+                    .computeIfAbsent(ts, k -> new Group(ts, groupCapacity));
             g.byResource.computeIfAbsent(rid, k -> new LinkedHashMap<>()).put(key, v);
             g.bytes += key.length() + 48;
             g.values++;
             g.byTier[tier.ordinal()]++;
-            return g.byResource.size() >= PUSH_RESOURCES || g.bytes >= PUSH_BYTES ? ts : null;
+            return g;
         }
     }
+
+    /** The previous cycle's largest push group (sizes the pending arrays). */
+    private int lastLargestGroup = 1024;
 
     private int pushNo;
 
@@ -1901,11 +1920,20 @@ final class CycleEngine {
         long ms = clock.getAsLong() - t;
         pushMs[0] += ms;
         res.seriesPushed += g.values;
+        buf.largestGroup = Math.max(buf.largestGroup, g.values);
+        if (o.clean) {
+            // Build 15: this group's marks only; a failed group leaves its own
+            // marks unset, so its buckets are sent again next cycle.
+            g.pending.commitTo(marks);
+        } else {
+            // Build 16 (review W1): kept until the end of the flush, when a
+            // newer clean bucket's mark of the same label is lowered below it.
+            buf.failed.add(g.pending);
+        }
         for (int i = 0; i < TIERS; i++) res.tierSeriesPushed[i] += g.byTier[i];
         res.pushBatchesOk += o.batchesOk;
         res.pushBatchesFailed += o.batchesFailed;
         if (!o.clean) {
-            buf.allClean = false;
             log.warn("push of " + g.values + " value(s) for " + g.byResource.size() + " "
                     + kind + " resource(s) was not clean: " + o.batchesFailed
                     + " batch(es) failed");
@@ -1918,11 +1946,13 @@ final class CycleEngine {
     }
 
     /**
-     * End of cycle: push every remaining group, then commit the dedup marks
-     * (review N5) only if every push of the cycle was clean. Not clean: no
-     * mark is recorded, so the next cycle re-sends these buckets while they
-     * are still in the 7-minute window (a value that did land is re-sent with
-     * the same time, which overwrites).
+     * End of cycle: push every remaining group. Each group's dedup marks were
+     * committed as its push came back clean (build 15); a group whose push
+     * was not clean left its marks unset, and now lowers any newer mark of
+     * the same (entity, label) below its time (build 16), so the next cycle
+     * re-sends those buckets while they are still in the 7-minute window,
+     * with the newer bucket of an affected label (a value that did land is
+     * re-sent with the same time, which overwrites).
      */
     private void flush(long id, PushBuffer buf, Result res, long[] pushMs) {
         for (String kind : new ArrayList<>(buf.byKind.keySet())) {
@@ -1930,9 +1960,9 @@ final class CycleEngine {
                 pushGroup(id, buf, kind, ts, res, pushMs);
             }
         }
-        if (buf.allClean) buf.pendingMarks.commitTo(marks);
-        buf.pendingMarks.clear();
-        buf.allClean = true;
+        for (Watermarks.Pending p : buf.failed) p.lowerIn(marks);
+        buf.failed.clear();
+        lastLargestGroup = Math.max(16, buf.largestGroup);
     }
 
     // ------------------------------------------------------------------
