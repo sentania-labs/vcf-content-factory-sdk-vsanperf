@@ -1,0 +1,395 @@
+# Canonical per-pak CI workflow for an independent SDK adapter repo.
+#
+# This file is the SOURCE OF TRUTH for the workflow that ships in
+# sentania-labs/vcf-content-factory-sdk-template and every pak instantiated
+# from it. It lives in the factory (under designs/) so it stays diffable and
+# can be updated centrally; copy it to `.github/workflows/build-pak-on-tag.yml`
+# in the pak repo.
+#
+# Drift: the pak repos carry copies of this file and drift when a fix lands in
+# only one place (the version check below reached the paks first; issue #11).
+# When this file changes, diff it against each child's copy (compliance,
+# unifi, synology, vcommunity, ...) and propagate; when a child gains a fix,
+# back-port it here first.
+#
+# Contract: push a `v*` tag on the pak repo -> a headless runner pulls the
+# published sdk-buildkit tarball from the factory repo's Releases, builds the
+# .pak deterministically (no agent, no factory checkout), gates on pak-compare,
+# and attaches the .pak to this tag's GitHub Release.
+#
+# Two jobs (issue #18 CI1). `build` holds only a read token and runs
+# everything that executes third-party code (the buildkit, the build, the
+# compare gate); it hands the .pak over as a workflow artifact. `publish`
+# runs no build code, holds the write token, and only creates the Release
+# from that artifact.
+#
+# The sdk-buildkit is pinned to one exact release and its tarball is
+# verified against a committed sha256 before it is extracted or run (issue
+# #18 CI2). To bump the kit: take the tarball line from the new release's
+# SHA256SUMS (gh release download sdk-buildkit-vX.Y.Z -R
+# sentania-labs/vcf-content-factory -p SHA256SUMS) and change BUILDKIT_TAG
+# and BUILDKIT_SHA256 (env, below) together, in one reviewed commit.
+#
+# Required secret: SDK_RUNTIME_SSH_KEY
+#   A read-only ed25519 deploy key for sentania-labs/vcf-content-factory-sdk-runtime.
+#   The Broadcom SDK jar (vrops-adapters-sdk-2.2.jar) is committed at the repo root of
+#   that private repo and is never bundled in the factory or buildkit (C2 redistribution
+#   constraint). The jar is fetched with this deploy key at the pinned
+#   SDK_RUNTIME_COMMIT and verified against SDK_JAR_SHA256 (env, below).
+#   Setup: generate an ed25519 keypair, add the PUBLIC half as a read-only deploy key on
+#   sentania-labs/vcf-content-factory-sdk-runtime, and store the PRIVATE half
+#   as the sdk-release Environment secret
+#   SDK_RUNTIME_SSH_KEY before tagging a release. Configure required reviewers
+#   for that Environment and v* tag rulesets separately before using it.
+name: build-pak-on-tag
+
+on:
+  push:
+    tags:
+      - 'v*'          # pak release tags (factory's buildkit uses sdk-buildkit-v*, a different repo)
+
+# No token scope at workflow level; each job asks for exactly what it needs.
+permissions: {}
+
+# Per-ref group: two pushes of the same tag queue instead of racing to
+# create one Release; different tags never block each other.
+concurrency:
+  group: build-pak-on-tag-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The buildkit is pinned to an exact release, never the floating major tag
+  # (sdk-buildkit-v1), and its tarball is checked against BUILDKIT_SHA256
+  # before it is extracted or executed (issue #18 CI2). A new kit release
+  # cannot reach a release build until this pin and checksum are changed
+  # here, in review. To move to a new kit: take the tarball's line from that
+  # release's SHA256SUMS and update both values together.
+  BUILDKIT_TAG: sdk-buildkit-v1.0.24
+  BUILDKIT_SHA256: 47d9cd25a0830046579dac7bb028ae2ea8ab0d19958c03449dbef2ca990e24ff
+  BUILDKIT_REPO: sentania-labs/vcf-content-factory
+  # Review registry updates together with the release source.
+  DEFECT_REGISTRY_COMMIT: 10b1ad0ed51b1fdc56dfe88c8c13376ec0e1595c
+  # The private SDK runtime repo is fetched at this exact commit, never its
+  # default-branch HEAD, and the jar is checked against SDK_JAR_SHA256 before
+  # javac sees it (sdk-runtime#1). A write to that repo cannot reach a
+  # release build until this pin and checksum are changed here, in review.
+  # To move to a new commit or jar: take the sha256 from the runtime repo's
+  # README (cross-check the factory's adapter_runtime/PROVENANCE.md) and
+  # update all three values together.
+  SDK_RUNTIME_COMMIT: b92956cc7c9ede5d9cfb5bc499c10b2e8e85cb9e
+  SDK_JAR: vrops-adapters-sdk-2.2.jar
+  SDK_JAR_SHA256: 2d53a91fc2b9a99d9b685ed10c1e37a471c2f71f04e7ae0fb2c53fdaa14b4f54
+
+jobs:
+  build:
+    # GitHub-hosted. This job reaches only github.com (checkout, the factory's
+    # defect registry and buildkit, the private SDK runtime repo), never the lab,
+    # and the pak repos are public, so hosted minutes are free. The legacy
+    # self-hosted `generic` runners were retired 2026-09-08; a label matching no
+    # runner queues silently for ~24h instead of failing. Use `runs-on: lab`
+    # only for a job that must reach lab resources.
+    runs-on: ubuntu-latest
+    environment: sdk-release
+    permissions:
+      contents: read      # read-only: no step in this job can write the repo
+
+    steps:
+      - name: Checkout adapter source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # Do not leave the token in .git/config for the build tooling.
+          persist-credentials: false
+          # Full history and branches, so the next step can prove the tagged
+          # commit is on main.
+          fetch-depth: 0
+
+      # Release rule 1 (github-ci skill): only a commit that is on main may
+      # publish. A v* tag pushed on a stray branch, or on an unmerged PR
+      # commit, fails here before any build or secret is touched.
+      - name: Verify the tagged commit is on main
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on main. Merge the change to main first, then tag a commit on main."
+            exit 1
+          fi
+          echo "Tagged commit ${GITHUB_SHA} is on main."
+
+      # Defect gate (factory RULE-012). Runs FIRST — before any expensive
+      # setup/build — so a v* tag fails fast and never produces a .pak while
+      # an open *blocking* defect names this pak in the factory registry.
+      #
+      # SECURITY (supply chain): the gate CODE is the VENDORED, in-repo
+      # ci/defect_gate.py — a committed, reviewable copy of the factory's
+      # gate script, run from THIS repo's checkout. It is NEVER fetched and
+      # executed from a mutable ref: doing so would run arbitrary
+      # factory-main code on a release runner that later holds
+      # SDK_RUNTIME_SSH_KEY (Codex PR-18 P1). Only the registry DATA
+      # (knowledge/context/defects.md) is fetched at the committed
+      # DEFECT_REGISTRY_COMMIT. Updating that pin requires review, just like
+      # the buildkit pin; newly opened defects require a registry pin update
+      # before the next release. Reconcile factory parser changes with this
+      # vendored fail-closed parser before re-vendoring.
+      #
+      # Derive the pak name from vcf-content-factory-sdk-<name>; override
+      # DEFECT_PAK_NAME below for other repository names.
+      #
+      # The gate fails closed (issue #18 CI4): an empty or unrecognised
+      # registry, or a malformed DEF heading, exits 1; Affects matches
+      # ignoring case; a heading may carry trailing text. Its tests run first.
+      - name: Test the vendored defect gate
+        run: python3 -m unittest discover -s tests/ci -p 'test_*.py' -v
+
+      - name: Defect gate (RULE-012)
+        env:
+          DEFECT_PAK_NAME: ""   # leave empty to derive from the repo name
+          GH_TOKEN: ${{ github.token }}   # public-repo API read only
+          REGISTRY_REPO: sentania-labs/vcf-content-factory
+          REGISTRY_PATH: knowledge/context/defects.md
+        run: |
+          set -euo pipefail
+          NAME="${DEFECT_PAK_NAME:-}"
+          if [ -z "$NAME" ]; then
+            NAME="${GITHUB_REPOSITORY##*/}"          # owner/vcf-content-factory-sdk-foo -> vcf-content-factory-sdk-foo
+            NAME="${NAME#vcf-content-factory-sdk-}"   # -> foo
+          fi
+          if [ ! -f ci/defect_gate.py ]; then
+            echo "::error::ci/defect_gate.py (vendored gate script) is missing — re-vendor it from the factory. Refusing to fetch+execute remote code." >&2
+            exit 1
+          fi
+          # DATA only, at the reviewed commit, never mutable main.
+          curl -fsSL "https://raw.githubusercontent.com/${REGISTRY_REPO}/${DEFECT_REGISTRY_COMMIT}/${REGISTRY_PATH}" -o defects.md
+          echo "Defect registry: ${REGISTRY_REPO}@${DEFECT_REGISTRY_COMMIT}:${REGISTRY_PATH}"
+          echo "Gating pak '$NAME' against the pinned factory defect registry (vendored gate)..."
+          python3 ci/defect_gate.py --pak "$NAME" --registry defects.md
+          # exit 0 = clear; 2 = blocked (defect lines printed above); 1 = bad registry.
+          # Any non-zero propagates via set -e and fails the build before it starts.
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The kit is pure stdlib + pyyaml (see the Set up Python and Install pinned PyYAML steps).
+      # Own the interpreter: the hosted image's system python3 is externally
+      # managed (PEP 668) and may refuse a bare `pip install`.
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      # Hash-pinned, wheels only (issue #18 CI7); see ci/requirements.txt.
+      - name: Install pinned PyYAML
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check \
+            --require-hashes --only-binary :all: -r ci/requirements.txt
+
+      # Fail fast when the pushed tag does not agree with adapter.yaml's
+      # version + build_number (factory issue #84, back-ported from the
+      # compliance workflow, template issue #11). Without this, a v* tag
+      # pushed without bumping build_number builds green and publishes a pak
+      # stamped with the PREVIOUS release's version: version-indistinguishable
+      # from the prior release, which breaks the upgrade path (2026-08-18,
+      # synology v1.0.0.29 / unifi v1.1.0.12).
+      - name: Verify tag matches adapter.yaml version+build_number
+        run: |
+          set -euo pipefail
+          expected="v$(python3 -c "import yaml; a = yaml.safe_load(open('adapter.yaml')); print('%s.%s' % (a['version'], a['build_number']))")"
+          if [ "${expected}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match adapter.yaml (expected ${expected}). Bump build_number (and version if appropriate) in adapter.yaml, commit, then re-tag."
+            exit 1
+          fi
+          echo "Tag ${GITHUB_REF_NAME} matches adapter.yaml (${expected})."
+
+      # The adapter's plain-JDK unit tests (compliance build 58, review W3).
+      # Run before the buildkit and the SDK jar are fetched, so a tag never
+      # builds a pak whose logic fails its own tests. Needs only the JDK set
+      # up above; no SDK jar, no secret.
+      - name: Run adapter unit tests
+        run: bash ci/run_java_tests.sh
+
+      - name: Download sdk-buildkit from factory releases
+        env:
+          # The factory repo is public, so the job's github.token can read its
+          # release assets across repos — no PAT needed.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The exact tarball for the pinned tag (sdk-buildkit-vX.Y.Z ->
+          # sdk-buildkit-X.Y.Z.tgz), not a glob.
+          KIT_TGZ="sdk-buildkit-${BUILDKIT_TAG#sdk-buildkit-v}.tgz"
+          mkdir -p _kit_dl
+          gh release download "$BUILDKIT_TAG" \
+            --repo "$BUILDKIT_REPO" \
+            --pattern "$KIT_TGZ" \
+            --dir _kit_dl
+          # Verify against the committed BUILDKIT_SHA256, never the release's
+          # own SHA256SUMS, before anything is extracted or run (issue #18
+          # CI2). A mismatch fails the release.
+          echo "${BUILDKIT_SHA256}  _kit_dl/${KIT_TGZ}" | sha256sum -c -
+          mkdir -p _kit
+          tar xzf "_kit_dl/${KIT_TGZ}" -C _kit
+          echo "Kit version: $(cat _kit/sdk_buildkit/VERSION 2>/dev/null || echo unknown)"
+
+      - name: Fetch Broadcom SDK jar (private runtime repo via deploy key)
+        env:
+          SDK_RUNTIME_SSH_KEY: ${{ secrets.SDK_RUNTIME_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SDK_RUNTIME_SSH_KEY:-}" ]; then
+            echo "::error::SDK_RUNTIME_SSH_KEY secret is not set — generate an ed25519 keypair, add the public half as a read-only deploy key on sentania-labs/vcf-content-factory-sdk-runtime, and store the private half as SDK_RUNTIME_SSH_KEY in the sdk-release Environment."
+            exit 1
+          fi
+          KEY_FILE="$RUNNER_TEMP/sdk_runtime_key"
+          KNOWN_HOSTS="$RUNNER_TEMP/sdk_runtime_known_hosts"
+          # Remove the key however this step ends, success or failure.
+          trap 'rm -f "$KEY_FILE"' EXIT
+          ( umask 077; printf '%s\n' "$SDK_RUNTIME_SSH_KEY" > "$KEY_FILE" )
+          chmod 600 "$KEY_FILE"
+          # GitHub's published SSH host keys, pinned instead of trusting
+          # whatever ssh-keyscan returns on first use (issue #18 CI5 item).
+          # Source: https://api.github.com/meta, field ssh_keys, as published
+          # on 2026-10-16. If GitHub rotates a key, the clone fails with a
+          # host key error: update these lines from that endpoint.
+          cat > "$KNOWN_HOSTS" <<'HOSTKEYS'
+          github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+          github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+          HOSTKEYS
+          # Fetch the pinned commit only (sdk-runtime#1), not HEAD.
+          git init -q _sdk_runtime
+          git -C _sdk_runtime remote add origin git@github.com:sentania-labs/vcf-content-factory-sdk-runtime.git
+          GIT_SSH_COMMAND="ssh -i $KEY_FILE -o IdentitiesOnly=yes -o UserKnownHostsFile=$KNOWN_HOSTS -o StrictHostKeyChecking=yes" \
+            git -C _sdk_runtime fetch -q --depth 1 origin "$SDK_RUNTIME_COMMIT"
+          git -C _sdk_runtime checkout -q FETCH_HEAD
+          GOT="$(git -C _sdk_runtime rev-parse HEAD)"
+          if [ "$GOT" != "$SDK_RUNTIME_COMMIT" ]; then
+            echo "::error::sdk-runtime checkout is $GOT, expected $SDK_RUNTIME_COMMIT"
+            exit 1
+          fi
+          ls _sdk_runtime/vrops-adapters-sdk-*.jar
+          # Verify the jar before anything compiles against it (sdk-runtime#1).
+          echo "${SDK_JAR_SHA256}  _sdk_runtime/${SDK_JAR}" | sha256sum -c -
+
+      - name: Build the .pak (deterministic, headless)
+        # --release is the explicit opt-in for the factory's version-line
+        # guardrail: only the tag-triggered CI release path stamps the real
+        # adapter.yaml version. Every other build path (hand-built / local
+        # dev preview) defaults to 0.0.0.<build_number> so a dev pak is never
+        # version-indistinguishable from a release. Do not pass --release
+        # outside of this workflow.
+        run: |
+          set -euo pipefail
+          PYTHONPATH=_kit python3 -m sdk_buildkit build-sdk "$GITHUB_WORKSPACE" \
+            --release \
+            --sdk-jar "_sdk_runtime/$SDK_JAR" \
+            --output dist
+          ls -l dist/*.pak
+
+      # The checksum-pinned kit returns nonzero for BLOCKING findings
+      # against the closest reference, missing references, or compare errors.
+      # pipefail preserves that status through tee; no prose is parsed.
+      - name: Gate on pak-compare (zero BLOCKING)
+        run: |
+          set -euo pipefail
+          PYTHONPATH=_kit python3 -m sdk_buildkit pak-compare dist/*.pak \
+            --reference-dir _kit/sdk_buildkit/reference_paks 2>&1 | tee compare.txt
+
+      # SHA256SUMS is computed here, next to the build, and published with
+      # the .pak (issue #18 CI6); publish re-verifies it after the handover.
+      - name: Checksum the .pak
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -- *.pak > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Hand the .pak to the publish job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pak
+          path: |
+            dist/*.pak
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    # Runs no build code: downloads the artifact `build` produced and creates
+    # the Release. The only job with a write token.
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # create the Release and upload its assets
+      id-token: write       # OIDC token for the provenance attestation
+      attestations: write   # store the attestation
+
+    steps:
+      - name: Download the built .pak
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pak
+          path: dist
+
+      - name: Verify the handed-over .pak against SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c SHA256SUMS
+
+      # A published release is immutable (issue #18 CI6): no --clobber. If
+      # the tag's Release already has any asset, fail instead of replacing
+      # it; a deliberate rebuild means deleting that Release by hand first.
+      # This runs BEFORE the attestation, so a re-run after a successful
+      # publish is refused without writing a provenance attestation for a pak
+      # that is never published.
+      - name: Refuse to replace a published Release
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # No checkout in this job, so name the repo explicitly.
+          if gh release view "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            n="$(gh release view "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')"
+            if [ "$n" -ne 0 ]; then
+              echo "::error::Release ${GITHUB_REF_NAME} already has ${n} asset(s); refusing to replace a published pak. Delete the Release by hand if a rebuild is intended."
+              exit 1
+            fi
+            echo "release=empty" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=none" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Signed build provenance for the .pak (issue #18 CI6). Verify with:
+      #   gh attestation verify <file>.pak --repo <owner>/<repo>
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.pak
+
+      # A Release that exists with no assets (created by hand for its notes)
+      # gets the assets uploaded; otherwise the Release is created with them.
+      # Known limit, accepted: uploading into an existing empty Release is
+      # not atomic. If the .pak uploads and SHA256SUMS then fails, a re-run
+      # is refused by the step above (the Release now has an asset). The
+      # operator deletes that half-published Release by hand and re-runs the
+      # workflow. (gh release create with the files is a single call and
+      # does not have this window in the common no-Release case.)
+      - name: Publish .pak and SHA256SUMS to the tag's Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_STATE: ${{ steps.existing.outputs.release }}
+        run: |
+          set -euo pipefail
+          if [ "$RELEASE_STATE" = "empty" ]; then
+            gh release upload "${GITHUB_REF_NAME}" dist/*.pak dist/SHA256SUMS \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/*.pak dist/SHA256SUMS \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Automated SDK pak build for ${GITHUB_REF_NAME} (buildkit ${BUILDKIT_TAG}). Verify: sha256sum -c SHA256SUMS; gh attestation verify <pak> --repo ${GITHUB_REPOSITORY}."
+          fi
