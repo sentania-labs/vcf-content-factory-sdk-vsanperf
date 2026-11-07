@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.1.0.18 (Unreleased)
+
+- test(adapter): build 18, the push model from live readings. The replay
+  harness's push duration is now 60 ms per call plus 1.5 ms per resource
+  (`--push-fixed-ms`, `--push-ms-per-resource`), from devel 9.0.2 `PERF
+  push` lines (build 16, VM tier on: 1 cluster 54 to 69 ms, 5 hosts 47 to
+  74 ms, 30 VMs 48 to 113 ms), quoted verbatim in README; build 17's 9 ms per
+  resource was a linear extrapolation from one batch. The build 17
+  synchronous-push simulation is kept. T4 with the defaults: every case
+  passes, (b') included (all 70 clusters every cycle, 107 to 127 s, pushes
+  50 to 93 s); default tiers push 1.6 s per cycle. README also notes that a
+  settings change resets the learned-empty state (devel: 29 calls a cycle
+  for three cycles after a reconfigure, then 26), as designed.
+
+## 1.1.0.17 (Unreleased)
+
+- test(adapter): build 17 (Codex on PR #10): the replay harness models the
+  Suite API push as synchronous in simulated time. A push call moves the
+  caller's simulated clock on by its modelled duration (the drain loop's
+  deadline check and `PERF push` / `push_ms` see it: the Codex case now
+  reports `push_ms=4000000`, `cycle_ms=4004940`), and workers that would
+  overfill the 16-message result queue during a push start no earlier than
+  its end. No wall-clock sleep. T4 with push time counted at 9 ms per
+  resource: default tiers unchanged (pushes ~6 s per cycle; all assertions
+  pass); all tiers with the VM tier per vCenter passes (pushes 144 to 214 s
+  per cycle, 41 to 53 of 70 clusters done); **per cluster, (b') fails**:
+  57 of 70 clusters complete on cycle 1 (pushes 216 to 239 s per cycle). The
+  assertion is not loosened; the 9 ms per resource is an extrapolation that
+  a live reading will replace. VM N = 1 (c): 16 to 17 of 70 clusters per
+  cycle, heap 22.4 MB.
+
 ## 1.1.0.16 (Unreleased)
 
 - fix(adapter): build 16, the build 15 review. W1: a failed push call's

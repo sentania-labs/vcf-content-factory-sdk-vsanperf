@@ -47,7 +47,7 @@ import java.util.function.LongSupplier;
  * Standalone: {@code ci/replay.sh [--clusters 70] [--hosts 6] [--cycles 6]
  * [--workers 4] [--latency-ms 190] [--ceiling 7] [--model vcenter|cluster]
  * [--tiers default|all|core] [--vm] [--disk] [--vm-every 3] [--vms-per-host 40]
- * [--heap] [--pace 20] [--perf] [--push-ms-per-resource 9]}. Design T4 ({@code ReplayBudgetTest}) drives it from the tests.
+ * [--heap] [--pace 20] [--perf] [--push-fixed-ms 60] [--push-ms-per-resource 1.5]}. Design T4 ({@code ReplayBudgetTest}) drives it from the tests.
  */
 final class ReplayHarness {
 
@@ -84,15 +84,22 @@ final class ReplayHarness {
          */
         int pace = 0;
         /**
-         * Simulated Suite API push latency per resource in a batch: the lab's
-         * {@code PERF push} measured ~45 ms for one batch of 5 HostSystems
-         * (390 values, design T5-9), so 9 ms per resource (a 100-resource
-         * batch ~0.9 s). Accounted in simulated time and reported per cycle
-         * ({@code push=}); not waited in wall time: a sleeping caller lets the
-         * result queue fill, and workers blocked on it stall the simulated-time
-         * ordering of the others.
+         * Simulated Suite API push latency, two terms: a fixed cost per push
+         * call plus a cost per resource in the batch (build 18), from the live
+         * {@code PERF push} lines of devel 9.0.2 (build 16, VM tier on, three
+         * cycles): 1 ClusterComputeResource 54 to 69 ms, 5 HostSystems 47 to
+         * 74 ms, 30 VirtualMachines 48 to 113 ms. The cost is dominated by the
+         * call (~50 to 60 ms), with at most ~1 to 2 ms per resource. Simulated,
+         * never waited in wall time (build 17): the push moves the caller's
+         * clock on by its duration, so the drain loop's deadline check and
+         * {@code PERF push} see it, and workers that would overfill the result
+         * queue during it wait for its end ({@link VirtualClock#callerBusy}).
+         * Approximation: the caller and the workers are not in lock step in
+         * wall time, so calls that complete before the caller registers its
+         * push are not held.
          */
-        double pushMsPerResource = 9.0;
+        double pushFixedMs = 60.0;
+        double pushMsPerResource = 1.5;
 
         List<EntityType> types() {
             return new VsanPerfConfig("vc", "u", "p", "", "", null, null, null, null,
@@ -134,11 +141,11 @@ final class ReplayHarness {
             return String.format(java.util.Locale.ROOT,
                     "cycle %d: calls=%d perf_phase=%.1f s clusters ok=%d timed_out=%d failed=%d "
                             + "values=%d newest_bucket=%d by_kind=%s learned_skips=%d "
-                            + "cut=%s push=%d calls %.1f s wall=%d ms%s",
+                            + "cut=%s push=%d calls %.1f s cycle=%.1f s wall=%d ms%s",
                     cycle, r.perfCalls, r.perfPhaseMs / 1000.0, r.clustersOk, r.clustersTimedOut,
                     r.clustersFailed, valuesPushed, newestBucketValues, byKind, r.learnedSkips,
                     r.lastError != null && r.lastError.contains("cycle deadline"), pushCalls,
-                    pushSimMs / 1000.0, wallMs,
+                    pushSimMs / 1000.0, r.cycleSeconds, wallMs,
                     peakHeapDelta > 0 ? String.format(java.util.Locale.ROOT,
                             " heap_peak=%.1f MB heap_retained=%.1f MB", peakHeapDelta / 1048576.0,
                             retainedHeapDelta / 1048576.0) : "");
@@ -172,6 +179,50 @@ final class ReplayHarness {
             prefix = "vsanperf-c" + engineCycle + "-";
             workers.clear();
             caller = baseMs;
+            busyStart = Long.MIN_VALUE;
+            busyEnd = Long.MIN_VALUE;
+            busyCompletions = 0;
+        }
+
+        // Synchronous push (build 17): while the caller is in a push call it
+        // drains nothing; workers fill the result queue and then block.
+        /** The engine's result queue: max(8, 4 x workers) messages. */
+        int queueCapacity = 16;
+        private long busyStart = Long.MIN_VALUE;
+        private long busyEnd = Long.MIN_VALUE;
+        private int busyCompletions;
+
+        /**
+         * The caller thread spends {@code ms} of simulated time in a push call:
+         * its clock moves on by that much (the engine's deadline check and
+         * {@code PERF push} see it), and workers are held per
+         * {@link #holdForCaller}.
+         */
+        synchronized void callerBusy(long ms) {
+            long start = getAsLong();
+            caller = start + ms;
+            busyStart = start;
+            busyEnd = caller;
+            busyCompletions = 0;
+        }
+
+        /**
+         * A worker about to start a call: if the caller is in a push and the
+         * calls finished meanwhile already fill the result queue, the worker
+         * cannot hand over another result until the push ends, so it starts
+         * no earlier than that.
+         */
+        synchronized void holdForCaller() {
+            long[] me = slot();
+            if (me[0] >= busyStart && me[0] < busyEnd && busyCompletions >= queueCapacity) {
+                me[0] = busyEnd;
+            }
+        }
+
+        /** A call finished at the worker's time: counted against a push in progress. */
+        synchronized void completed() {
+            long t = slot()[0];
+            if (t >= busyStart && t < busyEnd) busyCompletions++;
         }
 
         long base() {
@@ -544,6 +595,7 @@ final class ReplayHarness {
         private void serve(String cluster, long latencyMs) throws IOException {
             long gap = Math.round(1000.0 / cfg.ceilingPerSecond);
             long begin;
+            clock.holdForCaller();
             try {
                 // Both models: requests in simulated-time order, so cluster
                 // pickup and the shared server follow simulated time.
@@ -559,6 +611,7 @@ final class ReplayHarness {
                     nextFree = begin + gap;
                 }
                 clock.advance(begin + latencyMs);
+                clock.completed();
                 clock.wake();
                 pace(latencyMs);
                 return;
@@ -571,6 +624,7 @@ final class ReplayHarness {
                 }
             }
             clock.advance(begin + latencyMs);
+            clock.completed();
             clock.wake();
             pace(latencyMs);
         }
@@ -643,6 +697,8 @@ final class ReplayHarness {
 
     /** The recording stitcher and the Ops resource lists. */
     final class Ops implements CycleEngine.OpsApi {
+        /** Set by {@link #run}: the push holds the caller's simulated time (build 17). */
+        VirtualClock clock;
         final Map<Long, AtomicLong> byTime = new ConcurrentHashMap<>();
         final Map<String, AtomicLong> byKind = new ConcurrentHashMap<>();
         final AtomicLong values = new AtomicLong();
@@ -701,7 +757,8 @@ final class ReplayHarness {
             }
             byte[] wire = body.append("]}").toString().getBytes(StandardCharsets.UTF_8);
             bodyBytes.addAndGet(wire.length);
-            long ms = Math.round(cfg.pushMsPerResource * stats.size());
+            long ms = Math.round(cfg.pushFixedMs + cfg.pushMsPerResource * stats.size());
+            if (clock != null) clock.callerBusy(ms);
             pushSimMs.addAndGet(ms);
             pushCalls.incrementAndGet();
             String kind = "HostSystem";
@@ -727,6 +784,8 @@ final class ReplayHarness {
         VirtualClock clock = new VirtualClock();
         Vcenter vc = new Vcenter(clock);
         Ops ops = new Ops();
+        ops.clock = clock;
+        clock.queueCapacity = Math.max(8, 4 * cfg.workers);
         long baseline = cfg.heap ? usedAfterGc() : 0;
         CycleEngine e = new CycleEngine(vc, ops, new CycleEngine.Settings(new ClusterFilter("", ""),
                 cfg.workers, 30_000, log != null, cfg.types(), cfg.vmEveryN),
@@ -878,6 +937,7 @@ final class ReplayHarness {
                 case "--perf": c.perf = true; break;
                 case "--pace": c.pace = Integer.parseInt(args[++i]); break;
                 case "--push-ms-per-resource": c.pushMsPerResource = Double.parseDouble(args[++i]); break;
+                case "--push-fixed-ms": c.pushFixedMs = Double.parseDouble(args[++i]); break;
                 default: throw new IllegalArgumentException("unknown argument " + a);
             }
         }
