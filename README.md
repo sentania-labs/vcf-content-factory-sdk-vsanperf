@@ -87,7 +87,11 @@ tiers off; set host and cluster to `false` for Build 1 behaviour.
   deadline cannot starve the ones after it.
 - A type that answers empty 3 cycles in a row on a cluster is not queried
   there for about a day (core types and `ioinsight` never); see
-  REFERENCE.md "Learned types". A failing optional type is counted and
+  REFERENCE.md "Learned types". A settings change builds a new `CycleEngine`,
+  so the learned-empty state and the dedup marks restart (design B7; build
+  10 review). On devel the first cycle after a reconfigure re-sent both
+  window buckets (5,988 values = 2 x 2,994) and re-probed the three
+  lab-empty types (26 + 3 VM-tier calls = 29). A failing optional type is counted and
   logged; only a core-type failure, or every call failing, fails a cluster.
 - Disk tier: a `QueryDisksForVsan` per host maps each vSAN disk to its host
   (cached; re-read every 12th cycle, or after a miss at most once per 12
@@ -201,14 +205,62 @@ rendering of `pNIC:vmnic1` (needs a logged-in browser) and check 4's
 collector log scan (needs a Cloud Proxy login). Neither credential is in
 the lab profile.
 
-## Open before the scale release (issue #6)
+## Scale verification (issue #6)
 
-- **Design T3, replay harness:** recorded per-type responses replayed per
-  synthetic cluster with per-call latency and both call-ceiling models.
-  Not built.
-- **Design T4, heap budget gate:** 70 synthetic clusters x 6 hosts x 2 NICs
-  must stay under the 65 MB per-instance budget (design D6) inside the
-  cycle deadline. Not built; nothing yet verifies the scale claim.
+**Delivered (builds 14 to 18): design T3 and T4**, in simulated time against
+the verbatim captures (`tests/.../ReplayHarness.java`, gate
+`ReplayBudgetTest`, run by `ci/run_java_tests.sh`; standalone
+`ci/replay.sh` takes the arguments listed in the harness's class doc, for
+example `ci/replay.sh --clusters 70 --model vcenter --cycles 7`). 70 clusters
+x 6 hosts x 2 pNICs, 4 workers, 0.19 s per call.
+
+**Push model.** The Suite API push is synchronous in simulated time, as in
+production (build 17): a push call moves the caller's clock on by its
+duration, the caller drains nothing meanwhile, and workers block once the
+16-message result queue is full. Its duration is two terms (build 18):
+**60 ms per call plus 1.5 ms per resource** (`--push-fixed-ms`,
+`--push-ms-per-resource`), from these `PERF push` readings on devel 9.0.2
+(build 16, VM tier on, three cycles), verbatim:
+
+```
+ClusterComputeResource resources=1 stat_values=91 bytes~8106 ms=55/69/56/54
+HostSystem resources=5 stat_values=1095 bytes~97160 ms=74/51/61/47
+VirtualMachine resources=30 stat_values=1808 bytes~155226 ms=70/80/113/48
+```
+
+The cost is dominated by the call (~50 to 60 ms), with at most ~1 to 2 ms
+per resource. Build 17 assumed 9 ms per resource from one 5-host batch,
+which made the VM tier's pushes take most of each cycle.
+
+Every row is asserted in CI:
+
+| Case (assertions) | Cycles 1 to 3 | Steady | Push per cycle | Peak heap delta (retained) | Status |
+|---|---|---|---|---|---|
+| (a) default tiers, 7 calls/s per vCenter (deadline path on cycles 1 to 3; every cluster done and perf phase < 240 s from cycle 4; 98,350 series; 1,610 calls at cycle 7; heap < 65 MB and < 15 MB) | 1,664 to 1,681 calls in 240 s, 61 to 64 of 70 done (varies run to run) | cycle 4: 1,628 to 1,640 calls, 232.9 to 234.6 s (about 5 s under the assertion); cycle 7: 1,610 calls, 230.3 s | 1.6 s (2.9 s cold) | 6.3 MB (1.8 MB) | passes |
+| (a') default tiers, per cluster (all done; 88.9 s then 78.7 s within 2 s) | 1,820 calls, 88.9 s | 1,610 calls, 78.7 s | 1.6 s | not measured | passes |
+| (b) all tiers, VM N = 3, per vCenter (deadline path taken; heap < 65 / 50 MB, retained < 35 MB) | 1,602 to 1,679 calls in 240 s, 51 to 53 of 70 done | 1,630 to 1,644 calls, 60 of 70 done | 38 to 76 s | 33.7 MB (26.6 MB) | passes |
+| (b') all tiers, VM N = 3, per cluster (every cluster done every cycle; same heap limits) | 2,148 to 2,190 calls, 116 to 127 s, all done | 1,822 calls, 107 s, all done | 50 to 93 s | 34.0 MB (27.9 MB) | passes |
+| (c) all tiers, VM N = 1, per vCenter (heap only, same limits) | 1,551 to 1,598 calls, 47 to 48 of 70 done | same | 74 to 150 s | 34.3 MB (27.2 MB) | passes |
+
+Before build 15 the VM cases peaked at 70.8 to 76.6 MB. Heap: used heap
+after `System.gc()`, sampled every 150 ms of wall time during each cycle,
+minus a baseline taken before the engine exists; about 1 MB of noise, and a
+10 ms sampler reads 2 to 5 MB higher on the VM cases. The 15 / 50 / 35 MB
+ceilings sit at about twice the readings so a regression fails on its own.
+Cycles run paced (each call also waits its simulated latency / 20, VM
+cases / 40, of wall time) so the result queue behaves as in production.
+Figures vary from run to run because thread scheduling decides which
+worker takes which cluster. With the VM tier on, pushing still takes 38 to
+150 s of a cycle on the draining thread; under the per-vCenter ceiling the
+VM cases are bounded by the calls (all tiers do not fit 240 s at 70
+clusters, as the design's call plan says), not by the push.
+
+**Still open:**
+- **The vSAN Performance Service's call ceiling** (per vCenter or per
+  cluster, design D9). The harness models both; which one a real vCenter
+  has decides whether the default tiers fit a 5-minute cycle at 70 clusters
+  (230 s under the per-vCenter model, 79 s under the per-cluster one). Read
+  it from `PERF cycle` on a multi-cluster vCenter with timing logging on.
 - The platform acceptance above (design T5).
 
 ## Migrating from the Python vsanhostmetrics pack

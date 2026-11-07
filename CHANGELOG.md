@@ -1,5 +1,102 @@
 # Changelog
 
+## 1.1.0.18 (Unreleased)
+
+- test(adapter): build 18, the push model from live readings. The replay
+  harness's push duration is now 60 ms per call plus 1.5 ms per resource
+  (`--push-fixed-ms`, `--push-ms-per-resource`), from devel 9.0.2 `PERF
+  push` lines (build 16, VM tier on: 1 cluster 54 to 69 ms, 5 hosts 47 to
+  74 ms, 30 VMs 48 to 113 ms), quoted verbatim in README; build 17's 9 ms per
+  resource was a linear extrapolation from one batch. The build 17
+  synchronous-push simulation is kept. T4 with the defaults: every case
+  passes, (b') included (all 70 clusters every cycle, 107 to 127 s, pushes
+  50 to 93 s); default tiers push 1.6 s per cycle. README also notes that a
+  settings change builds a new `CycleEngine`, so the learned-empty state and
+  the dedup marks restart (design B7; build 10 review): on devel the first
+  cycle after a reconfigure re-sent both window buckets (5,988 values =
+  2 x 2,994) and re-probed the three lab-empty types (26 + 3 VM-tier
+  calls = 29).
+
+## 1.1.0.17 (Unreleased)
+
+- test(adapter): build 17 (Codex on PR #10): the replay harness models the
+  Suite API push as synchronous in simulated time. A push call moves the
+  caller's simulated clock on by its modelled duration (the drain loop's
+  deadline check and `PERF push` / `push_ms` see it: the Codex case now
+  reports `push_ms=4000000`, `cycle_ms=4004940`), and workers that would
+  overfill the 16-message result queue during a push start no earlier than
+  its end. No wall-clock sleep. T4 with push time counted at 9 ms per
+  resource: default tiers unchanged (pushes ~6 s per cycle; all assertions
+  pass); all tiers with the VM tier per vCenter passes (pushes 144 to 214 s
+  per cycle, 41 to 53 of 70 clusters done); **per cluster, (b') fails**:
+  57 of 70 clusters complete on cycle 1 (pushes 216 to 239 s per cycle). The
+  assertion is not loosened; the 9 ms per resource is an extrapolation that
+  a live reading will replace. VM N = 1 (c): 16 to 17 of 70 clusters per
+  cycle, heap 22.4 MB.
+
+## 1.1.0.16 (Unreleased)
+
+- fix(adapter): build 16, the build 15 review. W1: a failed push call's
+  pending marks are kept until the end of the flush, then each affected
+  (entity, metric) mark is lowered below the failed sample time (new
+  `Watermarks.lower`), so a failed older bucket is sent again next cycle
+  even when the newer bucket of the same metric was pushed clean (that newer
+  bucket is sent again too and lands on itself). `EngineTest` fails each of
+  the four push calls in turn: every failed value is re-sent, the only other
+  re-sent values are the newer buckets of the failed metrics, and the cycle
+  after sends nothing. W2: `stitch_targets` lists vSAN Direct Cluster, File
+  Service and IOInsight on HostSystem too, with the runtime-landing rule in
+  its identity text. W3: T4 (b) runs all tiers (disk on) and asserts the
+  deadline path; (b') per-cluster asserts every cluster completes; (c) VM
+  N = 1 heap only. W4: regression ceilings beside the 65 MB budget (default
+  peak < 15 MB; VM cases peak < 50 MB, retained < 35 MB); the recording
+  stitcher builds the real push body; the sampler's 2 to 5 MB blind spot is
+  documented. N1: README states the run-to-run variance and the cycle-4
+  margin. N2: the recording stitcher models push time (9 ms per resource,
+  from the lab's 5-host batch), reported per cycle. T4 numbers: (a) 6.9 MB;
+  (b) 32.7 MB; (b') 33.8 MB; (c) 37.5 MB.
+
+## 1.1.0.15 (Unreleased)
+
+- fix(adapter): build 15, the VM tier under the 65 MB heap budget (T4 (b),
+  build 14 finding). The dedup marks of pushed values are now committed per
+  push call (one target kind and sample time, at most 100 resources / ~1 MB)
+  as soon as that call comes back clean, instead of being held for the whole
+  cycle until every push was clean. A pending entry is 12 B (entity hash,
+  catalog position and width packed; the group's one sample time held once)
+  in arrays sized from the previous cycle's largest group. Semantics per
+  (entity, label) are unchanged: a mark is set only on a clean push; a failed
+  call leaves exactly its own values' marks unset, so only those buckets are
+  sent again next cycle (was: every bucket of the cycle). At the 70-cluster
+  example with the VM tier at N = 3 the peak heap delta fell from 76.6 to
+  35.7 MB (per vCenter) and from 74.6 to 37.4 MB (per cluster), ~28 MB of it
+  retained state; default tiers from 16.8 to 7.3 MB. T4 now asserts the
+  65 MB budget for the VM variant. Tests: `EngineTest.failedMiddleBatchOnly`,
+  `WatermarksTest` per-group commit.
+
+## 1.1.0.14 (Unreleased)
+
+- test(adapter): build 14, design T3 and T4 (pak issue #6). T3: a replay
+  harness (`tests/.../ReplayHarness.java`, standalone `ci/replay.sh`) runs
+  the real `CycleEngine` against N synthetic clusters built from the
+  verbatim captures (cluster uuid, node uuids, NIC names, VM uuids and vdisk
+  paths rewritten; buckets moved 5 minutes per cycle; replies generated as a
+  stream through the production parser), with per-call latency, both
+  ceiling models (per vCenter, per cluster), a recording stitcher and
+  simulated time through the engine's existing injectable clock (no
+  production change). T4: `ReplayBudgetTest` in `ci/run_java_tests.sh`. At
+  70 clusters x 6 hosts x 2 pNICs, default tiers, 4 workers, 0.19 s per
+  call, 7 calls/s per vCenter: cycles 1 to 3 take the deadline path (~1,664
+  calls in 240 s), cycle 4 completes in 235 s, then 1,610 calls in 230 s;
+  98,350 series per cycle; peak heap delta 16.8 MB (cold start), ~8 MB
+  steady. Per-cluster model: 88.9 s, then 78.7 s. **Finding:** default
+  tiers plus the VM tier at N = 3 peak at ~71 to 77 MB, over the 65 MB
+  budget (~27 MB retained); the test guards it at 90 MB and prints it. VM
+  tier stays off by default.
+- docs(adapter): `stitch_targets` in adapter.yaml (factory #310, PR #321):
+  the generated docs now list HostSystem, ClusterComputeResource and
+  VirtualMachine as push targets with their key groups.
+
 ## 1.1.0.13 (Unreleased)
 
 - fix(adapter): build 13 (Codex on PR #8): a VM read that fails after an
