@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.2.0.21 (Unreleased)
+
+- fix(adapter): build 21 (Codex on PR #11). `exclude_types` could not
+  exclude `computeCluster-remotedomclient` or `computeHost-remotedomclient`
+  under `metric_scope=all`: the setting was lower-cased and then matched
+  case-sensitively against the mixed-case ids, so both stayed queried and
+  were reported as unknown. The lookup is now case-insensitive
+  (`EntityType.byIdIgnoreCase`; the 69 ids differ by more than case);
+  requests keep the exact id. `ConfigTest` and
+  `ScopeTest.mixedCaseExclusion` exclude both, in either case: not in
+  scope, not reported unknown, never queried (54 calls).
+- test(adapter): `EngineTest.cutClusterRestartsFirst` failed once on the
+  JDK 25 CI leg (run 42385405904) because its cases raced wall-clock
+  deadlines and a real per-call timeout. The restart rule is now two pure
+  functions (`CycleEngine.settled`, `CycleEngine.restartChoice`, no change in
+  behaviour) tested from injected outcomes, plus one engine run on a
+  simulated clock with one worker, where a fixture call moves the clock past
+  the deadline; nothing in the test depends on real time.
+
 ## 1.2.0.20 (Unreleased)
 
 - fix(adapter): build 20, the build 19 review. B1: REFERENCE.md printed a

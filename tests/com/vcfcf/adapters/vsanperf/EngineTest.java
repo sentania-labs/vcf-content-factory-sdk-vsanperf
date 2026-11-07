@@ -35,6 +35,14 @@ public final class EngineTest {
         /** (cluster|type) to a body or an exception; missing = empty echo. */
         final Map<String, Object> answers = new ConcurrentHashMap<>();
         final Map<String, Long> delays = new ConcurrentHashMap<>();
+        /**
+         * Build 21: simulated time. A call in {@link #advances} moves
+         * {@link #fakeClock} on by its ms instead of sleeping, so a test that
+         * gives the engine {@code fakeClock::get} decides cuts by the fixture.
+         */
+        final Map<String, Long> advances = new ConcurrentHashMap<>();
+        final java.util.concurrent.atomic.AtomicLong fakeClock =
+                new java.util.concurrent.atomic.AtomicLong(1_000_000L);
         final Map<String, AtomicInteger> calls = new ConcurrentHashMap<>();
 
         @Override public String instanceUuid(long t) throws IOException {
@@ -102,6 +110,8 @@ public final class EngineTest {
                 throws IOException, InterruptedException {
             String k = cluster + "|" + type.id;
             order.add(k);
+            Long adv = advances.get(k);
+            if (adv != null) fakeClock.addAndGet(adv);
             calls.computeIfAbsent(k, x -> new AtomicInteger()).incrementAndGet();
             Long d = delays.get(k);
             if (d != null) Thread.sleep(d);
@@ -643,51 +653,63 @@ public final class EngineTest {
     }
 
     /**
-     * Builds 19 and 20 (design v3 T4 (d), build 19 review W1): with two
-     * workers, a cluster the deadline cut after it was started late (not one
-     * the workers started with) is first next cycle; a cluster that timed out
-     * on its own call before the deadline is not a cut and does not move the
-     * start; with one worker the rotation alone moves on (the restarted
-     * cluster would hold the only worker).
+     * Builds 19 to 21 (design v3 T4 (d), build 19 review W1, PR #11 CI
+     * flake): the restart rule decided from injected outcomes, never from
+     * wall-clock timing. {@link CycleEngine#settled} and
+     * {@link CycleEngine#restartChoice} directly, then one engine run on a
+     * simulated clock with one worker (serial, so the call order is the
+     * fixture's).
      */
     static void cutClusterRestartsFirst() throws Exception {
-        // Two workers, c3 cut by the deadline.
+        long dl = 10_000;
+        T.check(CycleEngine.settled(CycleEngine.Outcome.OK, dl + 5, dl), "OK settles");
+        T.check(CycleEngine.settled(CycleEngine.Outcome.FAILED, dl + 5, dl), "FAILED settles");
+        T.check(CycleEngine.settled(CycleEngine.Outcome.TIMED_OUT, dl - 1, dl),
+                "a per-call timeout before the deadline is not a cut");
+        T.check(!CycleEngine.settled(CycleEngine.Outcome.TIMED_OUT, dl, dl),
+                "TIMED_OUT at the deadline is a cut");
+
+        List<String> order = List.of("c1", "c2", "c3", "c4", "c5");
+        java.util.Set<Integer> started = java.util.Set.of(0, 1, 2, 3, 4);
+        java.util.Set<String> cut = new java.util.HashSet<>();
+        T.eq("c3", CycleEngine.restartChoice(order, started, java.util.Set.of("c1", "c2", "c4",
+                "c5"), java.util.Set.of(), 2, cut), "two workers: the cut c3 goes first");
+        T.eq(java.util.Set.of("c3"), cut, "cutNow");
+        cut.clear();
+        T.eq(null, CycleEngine.restartChoice(order, started, java.util.Set.of("c1", "c2", "c3",
+                "c4", "c5"), java.util.Set.of(), 2, cut),
+                "c3 timed out on its own call (settled): the start does not move");
+        T.check(cut.isEmpty(), "nothing cut");
+        T.eq(null, CycleEngine.restartChoice(order, started, java.util.Set.of("c1", "c2", "c4",
+                "c5"), java.util.Set.of(), 1, cut), "one worker: rule off");
+        cut.clear();
+        T.eq(null, CycleEngine.restartChoice(order, started, java.util.Set.of("c3", "c4", "c5"),
+                java.util.Set.of(), 2, cut), "c1 and c2 cut, but the workers started with them");
+        T.eq(java.util.Set.of("c1", "c2"), cut, "both counted as cut");
+        cut.clear();
+        T.eq("c4", CycleEngine.restartChoice(order, started, java.util.Set.of("c1", "c2", "c5"),
+                java.util.Set.of("c3"), 2, cut), "c3 cut last cycle too: the next cut one");
+        cut.clear();
+        T.eq("c3", CycleEngine.restartChoice(order, java.util.Set.of(0, 1, 2), java.util.Set.of(
+                "c1", "c2"), java.util.Set.of(), 2, cut), "c3 started and cut goes first");
+        T.eq(java.util.Set.of("c3"), cut, "c4 and c5 never started before the deadline: not cut");
+
+        // Engine, simulated clock, one worker: c2's DOM owner call takes the
+        // clock past the deadline. c3 to c5 are picked up after it and do not
+        // count as started; with one worker the rule is off, so cycle 2
+        // continues after c2, at c3.
         FakeVc vc = fiveClusters();
-        vc.delays.put("domain-c3|host-domowner", 3_000L);
+        vc.advances.put("domain-c2|host-domowner", 5_000L);
         FakeOps ops = labOps(vc.inventory);
-        CycleEngine e = engine(vc, ops, 2, 30_000, new T.RecLog(), "");
-        CycleEngine.Result r1 = e.run(in(600));
-        T.eq(1, r1.clustersTimedOut, "c3 cut");
-        T.eq(4, r1.clustersOk, "the others done");
+        CycleEngine e = new CycleEngine(vc, ops, new CycleEngine.Settings(new ClusterFilter("", ""),
+                1, 30_000, true), new T.RecLog(), vc.fakeClock::get);
+        CycleEngine.Result r1 = e.run(vc.fakeClock.get() + 1_000);
+        T.eq(1, r1.clustersOk, "c1 done");
+        T.eq(1, vc.calls("domain-c2", EntityType.HOST_DOMOWNER), "c2 started, then cut");
+        T.eq(0, vc.calls("domain-c3", EntityType.HOST_DOMOWNER), "c3 to c5 never called");
         int mark = vc.order.size();
-        e.run(in(600));
-        T.eq(List.of("domain-c3", "domain-c4"), sorted(firstTwo(vc, mark)),
-                "two workers: cycle 2 starts with the cut c3 (and c4 beside it)");
-        // (A cluster cut at the front, or cut two cycles running, is never
-        // restarted first: noStarvationBehindSlowCluster.)
-
-        // Two workers, c3 times out on its own call before the deadline: not a cut.
-        vc = fiveClusters();
-        vc.answers.put("domain-c3|host-domowner",
-                new HttpTimeoutException("synthetic per-call timeout"));
-        e = engine(vc, labOps(vc.inventory), 2, 30_000, new T.RecLog(), "");
-        CycleEngine.Result t1 = e.run(in(5_000));
-        T.eq(1, t1.clustersTimedOut, "c3 timed out on its call");
-        mark = vc.order.size();
-        e.run(in(5_000));
-        T.eq(List.of("domain-c1", "domain-c2"), sorted(firstTwo(vc, mark)),
-                "a per-call timeout does not move the start (rotation wraps to c1, c2)");
-
-        // One worker, c2 cut by the deadline: no restart-first.
-        vc = fiveClusters();
-        vc.delays.put("domain-c2|host-domowner", 3_000L);
-        e = engine(vc, labOps(vc.inventory), 1, 30_000, new T.RecLog(), "");
-        e.run(in(600));
-        T.eq(1, vc.calls("domain-c2", EntityType.HOST_DOMOWNER), "c2 started late, cut");
-        mark = vc.order.size();
-        e.run(in(600));
-        T.eq("domain-c3", firstTwo(vc, mark).get(0),
-                "one worker: cycle 2 continues after c2, not with it");
+        e.run(vc.fakeClock.get() + 1_000);
+        T.eq("domain-c3", firstTwo(vc, mark).get(0), "one worker: cycle 2 starts at c3");
     }
 
     static List<String> sorted(List<String> l) {

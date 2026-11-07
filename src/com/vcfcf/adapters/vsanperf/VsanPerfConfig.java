@@ -6,7 +6,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -137,7 +136,7 @@ final class VsanPerfConfig {
         List<EntityType> scope = EntityType.ofTiers(tiers, this.scope);
         List<String> unknown = new ArrayList<>();
         for (String id : ClusterFilter.items(excludeTypes)) {
-            EntityType t = EntityType.byId(id.toLowerCase(Locale.ROOT));
+            EntityType t = EntityType.byIdIgnoreCase(id);
             if (t == null) unknown.add(id);
             else scope.remove(t);
         }

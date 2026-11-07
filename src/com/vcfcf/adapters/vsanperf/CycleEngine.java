@@ -1093,19 +1093,10 @@ final class CycleEngine {
         // completed, failed, timed out or cut.
         int furthest = furthestStarted.get();
         if (furthest >= 0) lastAttempted = scope.get(furthest).moid;
-        restartAt = null;
+        List<String> order = new ArrayList<>(scope.size());
+        for (Inventory.Cluster c : scope) order.add(c.moid);
         Set<String> cutNow = new HashSet<>();
-        for (int p = 0; p < scope.size(); p++) {
-            String moid = scope.get(p).moid;
-            if (!startedBefore.contains(p) || cycleSettled.contains(moid)) continue;
-            cutNow.add(moid);
-            // Review W1: never with one worker, where the restarted cluster
-            // would hold the only worker; the rotation alone moves on.
-            if (restartAt == null && workers > 1 && p >= workers
-                    && !cutLastCycle.contains(moid)) {
-                restartAt = moid;
-            }
-        }
+        restartAt = restartChoice(order, startedBefore, cycleSettled, cutLastCycle, workers, cutNow);
         cutLastCycle = cutNow;
         if (fatalError != null) {
             // Review B1: the pool is shut down above; the error ends the cycle.
@@ -1154,6 +1145,41 @@ final class CycleEngine {
         long first = span.start.get();
         long last = span.end.get();
         res.perfPhaseMs = first == Long.MAX_VALUE || last < first ? 0 : last - first;
+    }
+
+    /**
+     * Build 20 (review W1): a cluster's end that the deadline did not cause:
+     * OK, FAILED, or TIMED_OUT on its own call timeout before the deadline.
+     * A cluster that never reported, or ended TIMED_OUT at or after the
+     * deadline, was cut. Pure, so the tests decide it from injected outcomes.
+     */
+    static boolean settled(Outcome outcome, long endedAt, long deadlineMs) {
+        return outcome != Outcome.TIMED_OUT || endedAt < deadlineMs;
+    }
+
+    /**
+     * Builds 19 and 20: the next cycle's first cluster, or {@code null} to
+     * rotate after the furthest one started. {@code order} is this cycle's
+     * order; a cluster is cut when it started before the deadline
+     * ({@code startedBefore}, positions) and is not {@code settled}; every
+     * cut one goes into {@code cutNow}. The earliest cut cluster is chosen,
+     * except with one worker (it would hold the only worker), one the
+     * workers started with (position below {@code workers}: it had the whole
+     * cycle) and one {@code cutLastCycle} also holds (a chronic one rotates).
+     * Pure, so the tests decide it from injected outcomes.
+     */
+    static String restartChoice(List<String> order, Set<Integer> startedBefore,
+            Set<String> settled, Set<String> cutLastCycle, int workers, Set<String> cutNow) {
+        String choice = null;
+        for (int p = 0; p < order.size(); p++) {
+            String moid = order.get(p);
+            if (!startedBefore.contains(p) || settled.contains(moid)) continue;
+            cutNow.add(moid);
+            if (choice == null && workers > 1 && p >= workers && !cutLastCycle.contains(moid)) {
+                choice = moid;
+            }
+        }
+        return choice;
     }
 
     /**
@@ -1258,9 +1284,7 @@ final class CycleEngine {
             res.tierLearnedSkips[i] += d.tierSkips[i];
             res.learnedSkips += d.tierSkips[i];
         }
-        if (d.outcome != Outcome.TIMED_OUT || d.endedAt < cycleDeadlineMs) {
-            cycleSettled.add(d.cluster.moid);
-        }
+        if (settled(d.outcome, d.endedAt, cycleDeadlineMs)) cycleSettled.add(d.cluster.moid);
         switch (d.outcome) {
             case OK: res.clustersOk++; break;
             case FAILED: res.clustersFailed++; break;

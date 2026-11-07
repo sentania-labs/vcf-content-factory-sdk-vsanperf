@@ -40,6 +40,7 @@ public final class ScopeTest {
         scopeSwitchRestarts();
         remoteRule();
         remoteRuleVmTier();
+        mixedCaseExclusion();
         System.out.println("ScopeTest: all assertions passed");
     }
 
@@ -451,5 +452,24 @@ public final class ScopeTest {
         T.eq(1, log.count("remote (HCI Mesh) entity id(s)"), "one WARN");
         T.check(!log.text().contains("synthetic-vm-computing-elsewhere"), "no id logged");
     }
-}
 
+    /**
+     * Build 21 (Codex on PR #11): excluding the two mixed-case types, as an
+     * operator types them or in lower case, keeps them out of the cycle:
+     * never queried, not reported as unknown, the rest unchanged (54 calls).
+     */
+    static void mixedCaseExclusion() throws Exception {
+        VsanPerfConfig cfg = new VsanPerfConfig("vc", "u", "p", "", "", null, null, null, null,
+                null, null, null, null, null,
+                "computecluster-remotedomclient,computeHost-remotedomclient", "all");
+        T.check(cfg.unknownExcludes.isEmpty(), "not unknown");
+        EngineTest.FakeVc vc = p3Vc();
+        CycleEngine e = new CycleEngine(vc, TiersEngineTest.labOps(vc.inventory),
+                new CycleEngine.Settings(new ClusterFilter("", ""), 4, 30_000, false, cfg.types, 3,
+                        cfg.scope), new T.RecLog(), System::currentTimeMillis);
+        CycleEngine.Result r = e.run(in(60_000));
+        T.eq(54, r.perfCalls, "56 default-tier types under all, two excluded");
+        T.eq(0, vc.calls(LAB, EntityType.COMPUTECLUSTER_REMOTEDOMCLIENT), "computeCluster not queried");
+        T.eq(0, vc.calls(LAB, EntityType.COMPUTEHOST_REMOTEDOMCLIENT), "computeHost not queried");
+    }
+}

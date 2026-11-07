@@ -120,7 +120,7 @@ This pak pushes keys onto resource kinds owned by other management packs, throug
 ## Quick Reference
 
 - **Adapter kind:** `vcfcf_vsanperf`
-- **Version:** 0.0.0.20
+- **Version:** 0.0.0.21
 - **Traversal spec:** (none)
 - **Resource kinds:** 1
 - **Metrics pushed onto:** HostSystem (VMWARE), ClusterComputeResource (VMWARE), VirtualMachine (VMWARE) (see [Metrics Pushed Onto](#metrics-pushed-onto))

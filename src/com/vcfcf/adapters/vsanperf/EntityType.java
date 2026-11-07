@@ -2385,6 +2385,19 @@ enum EntityType {
         return tier == Tier.VM ? 16L * 1024 * 1024 : 4L * 1024 * 1024;
     }
 
+    /**
+     * Build 21 (Codex on PR #11): the type an operator names in a setting,
+     * any case ({@code computecluster-remotedomclient} is
+     * {@code computeCluster-remotedomclient}). The 69 ids differ by more than
+     * case, so this is unambiguous; requests keep the exact {@link #id}.
+     */
+    static EntityType byIdIgnoreCase(String id) {
+        for (EntityType t : values()) {
+            if (t.id.equalsIgnoreCase(id)) return t;
+        }
+        return null;
+    }
+
     /** The type with this {@code entityRefId} prefix (any of the 69), or {@code null}. */
     static EntityType byId(String id) {
         for (EntityType t : values()) {

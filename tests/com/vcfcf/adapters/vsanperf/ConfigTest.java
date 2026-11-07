@@ -99,6 +99,25 @@ public final class ConfigTest {
         T.eq(java.util.List.of("no-such-type"), scoped(null, null, "no-such-type", "all")
                 .unknownExcludes, "an id outside the 69 stays a WARN");
         T.check(all.toString().contains("scope=all types=56"), "toString: " + all);
+        // Build 21 (Codex on PR #11): the two mixed-case ids can be excluded,
+        // in their own case or any other; neither stays in scope nor is
+        // reported unknown; the exact id is what the request carries.
+        for (String ex2 : new String[] {"computeCluster-remotedomclient,computeHost-remotedomclient",
+                "COMPUTECLUSTER-REMOTEDOMCLIENT, computehost-remotedomclient"}) {
+            VsanPerfConfig mixed = scoped(null, null, ex2, "all");
+            T.check(!mixed.types.contains(EntityType.COMPUTECLUSTER_REMOTEDOMCLIENT)
+                    && !mixed.types.contains(EntityType.COMPUTEHOST_REMOTEDOMCLIENT),
+                    "both mixed-case types excluded: " + ex2);
+            T.eq(all.types.size() - 2, mixed.types.size(), "exactly two removed: " + ex2);
+            T.check(mixed.unknownExcludes.isEmpty(), "not reported unknown: " + mixed.unknownExcludes);
+        }
+        T.check(VsanJsonClient.perfBody(EntityType.COMPUTEHOST_REMOTEDOMCLIENT, EntityType.Scope.ALL,
+                "domain-c1", 0, CycleEngine.WINDOW_MS).contains("\"computeHost-remotedomclient:*\""),
+                "the request keeps the exact id");
+        for (EntityType t : EntityType.values()) {
+            T.eq(t, EntityType.byIdIgnoreCase(t.id.toUpperCase(java.util.Locale.ROOT)),
+                    t.id + ": unambiguous ignoring case");
+        }
     }
 
     static VsanPerfConfig cfg(String host, String workers, String timeout, String deadline,
