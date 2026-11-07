@@ -87,11 +87,11 @@ tiers off; set host and cluster to `false` for Build 1 behaviour.
   deadline cannot starve the ones after it.
 - A type that answers empty 3 cycles in a row on a cluster is not queried
   there for about a day (core types and `ioinsight` never); see
-  REFERENCE.md "Learned types". Learned state lives in memory and starts
-  over when the account's settings are saved (a reconfigure builds a new
-  engine), so the empty types are queried again for 3 cycles: on devel the
-  default tiers made 29 calls a cycle for three cycles after a reconfigure,
-  then 26 again (`ioinsight` and the three learned types each re-probed). A failing optional type is counted and
+  REFERENCE.md "Learned types". A settings change builds a new `CycleEngine`,
+  so the learned-empty state and the dedup marks restart (design B7; build
+  10 review). On devel the first cycle after a reconfigure re-sent both
+  window buckets (5,988 values = 2 x 2,994) and re-probed the three
+  lab-empty types (26 + 3 VM-tier calls = 29). A failing optional type is counted and
   logged; only a core-type failure, or every call failing, fails a cluster.
 - Disk tier: a `QueryDisksForVsan` per host maps each vSAN disk to its host
   (cached; re-read every 12th cycle, or after a miss at most once per 12

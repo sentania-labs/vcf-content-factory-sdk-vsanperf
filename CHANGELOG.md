@@ -11,8 +11,11 @@
   synchronous-push simulation is kept. T4 with the defaults: every case
   passes, (b') included (all 70 clusters every cycle, 107 to 127 s, pushes
   50 to 93 s); default tiers push 1.6 s per cycle. README also notes that a
-  settings change resets the learned-empty state (devel: 29 calls a cycle
-  for three cycles after a reconfigure, then 26), as designed.
+  settings change builds a new `CycleEngine`, so the learned-empty state and
+  the dedup marks restart (design B7; build 10 review): on devel the first
+  cycle after a reconfigure re-sent both window buckets (5,988 values =
+  2 x 2,994) and re-probed the three lab-empty types (26 + 3 VM-tier
+  calls = 29).
 
 ## 1.1.0.17 (Unreleased)
 
