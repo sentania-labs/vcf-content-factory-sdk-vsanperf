@@ -65,7 +65,12 @@ final class VsanPerfConfig {
         this.callTimeoutSeconds = intSetting(callTimeout, DEFAULT_CALL_TIMEOUT_S, 1,
                 MAX_CALL_TIMEOUT_S, "Call timeout (s)");
         this.cycleDeadlineSeconds = intSetting(cycleDeadline, 0, 0, 86_400, "Cycle deadline (s)");
-        this.perfTimingLogging = "true".equalsIgnoreCase(perfTiming);
+        this.perfTimingLogging = parseFlag(perfTiming);
+    }
+
+    /** The strict on/off parse of perf_timing_logging: only {@code true}, any case. */
+    static boolean parseFlag(String raw) {
+        return "true".equalsIgnoreCase(raw);
     }
 
     String password() {

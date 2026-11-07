@@ -96,7 +96,7 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
             CycleEngine engine = new CycleEngine(client, sas == null ? null : opsApi(sas),
                     new CycleEngine.Settings(cfg.filter(), cfg.workers,
                             cfg.callTimeoutSeconds * 1000L, cfg.perfTimingLogging),
-                    log(componentLogger(CycleEngine.class)), System::currentTimeMillis);
+                    pakLog(), System::currentTimeMillis);
             engine.setStopSignal(this::isAbortRequested);
             this.runtime = new Runtime(cfg, client, sas, engine);
             // Never the principal, password or token. // REDACT-SECRET
@@ -131,7 +131,7 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
         javax.net.ssl.SSLContext ssl = getPlatformSslContext(cfg.vcenterHost);
         return new VsanJsonClient(cfg.baseUrl(), cfg.username, cfg.password(), // REDACT-SECRET
                 VsanJsonClient.httpClient(ssl, VsanPerfConfig.CONNECT_TIMEOUT_S * 1000L),
-                cfg.callTimeoutSeconds * 1000L, log(componentLogger(VsanJsonClient.class)));
+                cfg.callTimeoutSeconds * 1000L, pakLog());
     }
 
     private void release(Runtime r) {
@@ -309,6 +309,17 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
             public void rediscover(VsanPerfConfig cfg, ManagedHttpClient http,
                     ResourceConfig adapterInst, AdapterBase adapter) {
                 cycleInstance = adapterInst;
+                // Build 9: Performance timing logging is re-read every cycle
+                // from the instance's stored settings, not only at configure.
+                Runtime r = runtime;
+                if (r != null && adapterInst != null) {
+                    try {
+                        r.engine.setPerfLogging(VsanPerfConfig.parseFlag(
+                                getIdentifier(adapterInst, "perf_timing_logging")));
+                    } catch (RuntimeException ignored) {
+                        // keep the configured value
+                    }
+                }
             }
 
             @Override
@@ -395,12 +406,20 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
         };
     }
 
-    private static Log log(final com.integrien.alive.common.adapter3.Logger l) {
-        if (l == null) return Log.NONE;
+    /**
+     * The pak's own log lines, through the adapter's {@code logInfo} /
+     * {@code logWarn} / {@code logError} (build 9). On devel 9.0.2 those are
+     * the only pak lines that reached {@code VsanPerfAdapter_<id>.log}:
+     * everything the engine and client logged through
+     * {@code componentLogger(CycleEngine.class)} and
+     * {@code componentLogger(VsanJsonClient.class)} (the cycle summary, the
+     * PERF lines, cluster WARNs) was absent, on a failing instance as well.
+     */
+    private Log pakLog() {
         return new Log() {
-            @Override public void info(String m) { l.info(m); }
-            @Override public void warn(String m) { l.warn(m); }
-            @Override public void error(String m) { l.error(m); }
+            @Override public void info(String m) { logInfo(m); }
+            @Override public void warn(String m) { logWarn(m); }
+            @Override public void error(String m) { logError(m, null); }
         };
     }
 }

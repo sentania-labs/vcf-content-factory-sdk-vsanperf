@@ -129,6 +129,24 @@ final class CycleEngine {
     private final Settings settings;
     private final Log log;
     private final LongSupplier clock;
+    /**
+     * Performance timing logging, re-read every cycle by the adapter (build
+     * 9); starts at the configured value.
+     */
+    private volatile boolean perfLogging;
+
+    void setPerfLogging(boolean on) {
+        if (on != perfLogging) {
+            log.info("Performance timing logging " + (on ? "on" : "off")
+                    + " (instance setting perf_timing_logging)");
+        }
+        perfLogging = on;
+    }
+
+    boolean perfLogging() {
+        return perfLogging;
+    }
+
     /** Stop Collecting: ends the drain like the deadline. */
     private volatile java.util.function.BooleanSupplier stop = () -> false;
 
@@ -164,6 +182,7 @@ final class CycleEngine {
         this.settings = settings;
         this.log = log == null ? Log.NONE : log;
         this.clock = clockMs;
+        this.perfLogging = settings.perfLogging;
     }
 
     // ------------------------------------------------------------------
@@ -961,7 +980,7 @@ final class CycleEngine {
     }
 
     private void perf(String line) {
-        if (settings.perfLogging) log.info(line);
+        if (perfLogging) log.info(line);
     }
 
     private static int pagesOf(VcenterApi vc) {

@@ -166,6 +166,7 @@ public final class EngineTest {
         capsWithinTimeGroup();
         noStarvationBehindSlowCluster();
         loginFailsCollectThrows();
+        summaryAndPerfLinesEveryCycle();
         System.out.println("EngineTest: all assertions passed");
     }
 
@@ -569,6 +570,49 @@ public final class EngineTest {
                 new T.RecLog(), ""), in(30_000), sink);
         T.eq(390, r.seriesPushed, "healthy cycle");
         T.eq("none", got.get(CycleReport.LAST_ERROR), "last_error none");
+    }
+
+    /**
+     * Build 9: the always-on INFO cycle summary is written every cycle,
+     * a failed one included, to the log the adapter passes in (its own
+     * logInfo route); PERF lines follow the flag as re-read each cycle.
+     */
+    static void summaryAndPerfLinesEveryCycle() throws Exception {
+        FakeVc vc = labVc();
+        T.RecLog log = new T.RecLog();
+        CycleEngine e = new CycleEngine(vc, labOps(vc.inventory), new CycleEngine.Settings(
+                new ClusterFilter("", ""), 4, 30_000, false), log, System::currentTimeMillis);
+
+        CycleReport.run(e, in(30_000), null);
+        String healthy = log.text();
+        T.check(healthy.contains("INFO cycle 1 summary: clusters ok=1 failed=0 timed_out=0 of 1; "
+                + "perf calls=3; series pushed=390"), "summary line: " + healthy);
+        T.check(healthy.contains("hosts unresolved=0; push batches ok=")
+                && healthy.contains(" s\n"), "summary carries hosts, batches, seconds");
+        T.eq(0, log.count("PERF "), "flag off: no PERF line");
+
+        // The setting is re-read each cycle: on now, without a new engine.
+        e.setPerfLogging(true);
+        CycleReport.run(e, in(30_000), null);
+        T.eq(1, log.count("INFO PERF cycle cycle=2"), "flag on: the PERF cycle line, at INFO");
+        T.check(log.count("INFO PERF call cycle=2") == 3, "PERF call lines");
+        T.check(log.text().contains("Performance timing logging on"), "the change is logged");
+
+        // A failed cycle still writes its summary.
+        vc.loginFailure = new IOException("Login: ConnectException",
+                new java.net.ConnectException("refused"));
+        T.expect(IOException.class, () -> CycleReport.run(e, in(30_000), null), "failed cycle");
+        T.check(log.text().contains("INFO cycle 3 summary: clusters ok=0")
+                && log.text().contains("FAILED: vCenter login or ServiceInstance read failed"),
+                "failed cycle summary: " + log.text());
+        T.eq(1, log.count("INFO PERF cycle cycle=3"), "PERF cycle line on a failed cycle too");
+
+        e.setPerfLogging(false);
+        vc.loginFailure = null;
+        int before = log.count("PERF ");
+        CycleReport.run(e, in(30_000), null);
+        T.eq(before, log.count("PERF "), "flag off again: no new PERF line");
+        T.eq(1, log.count("INFO cycle 4 summary"), "summary every cycle");
     }
 
     /** The 100-host cap applies within a time group: 150 hosts, one time, two calls. */
