@@ -33,14 +33,25 @@ final class Inventory {
         final String vsanClusterUuid;
         /** {@code null} when unreadable. */
         final Boolean vsanEnabled;
+        /**
+         * The host's {@code configManager.vsanSystem} moId (disk tier, the
+         * {@code QueryDisksForVsan} target); {@code null} when not read.
+         */
+        final String vsanSystem;
 
         Host(String moid, String name, String nodeUuid, String vsanClusterUuid,
                 Boolean vsanEnabled) {
+            this(moid, name, nodeUuid, vsanClusterUuid, vsanEnabled, null);
+        }
+
+        Host(String moid, String name, String nodeUuid, String vsanClusterUuid,
+                Boolean vsanEnabled, String vsanSystem) {
             this.moid = moid;
             this.name = name;
             this.nodeUuid = blankToNull(nodeUuid);
             this.vsanClusterUuid = blankToNull(vsanClusterUuid);
             this.vsanEnabled = vsanEnabled;
+            this.vsanSystem = blankToNull(vsanSystem);
         }
 
     }
@@ -118,18 +129,27 @@ final class Inventory {
     static final String P_ENABLED = "config.vsanHostConfig.enabled";
     static final String P_CLUSTER_UUID = "config.vsanHostConfig.clusterInfo.uuid";
     static final String P_NODE_UUID = "config.vsanHostConfig.clusterInfo.nodeUuid";
+    /** Disk tier only (v2 call plan step 1; P2: reads fine in the pathSet). */
+    static final String P_VSAN_SYSTEM = "configManager.vsanSystem";
+
+    static String retrieveBody(String viewMoid) {
+        return retrieveBody(viewMoid, false);
+    }
 
     /**
      * The R2 {@code RetrievePropertiesEx} body over a ContainerView of
-     * ClusterComputeResource (api map, verbatim apart from the view moId).
+     * ClusterComputeResource (api map, verbatim apart from the view moId);
+     * with the disk tier on, the host pathSet gains
+     * {@code configManager.vsanSystem}.
      */
-    static String retrieveBody(String viewMoid) {
+    static String retrieveBody(String viewMoid, boolean withVsanSystem) {
         return "{\"specSet\":[{\"_typeName\":\"PropertyFilterSpec\","
                 + "\"propSet\":[{\"_typeName\":\"PropertySpec\",\"type\":\"ClusterComputeResource\","
                 + "\"pathSet\":[\"" + P_NAME + "\",\"" + P_HOST + "\"]},"
                 + "{\"_typeName\":\"PropertySpec\",\"type\":\"HostSystem\",\"pathSet\":[\""
                 + P_NAME + "\",\"" + P_ENABLED + "\",\"" + P_CLUSTER_UUID + "\",\""
-                + P_NODE_UUID + "\"]}],"
+                + P_NODE_UUID + "\"" + (withVsanSystem ? ",\"" + P_VSAN_SYSTEM + "\"" : "")
+                + "]}],"
                 + "\"objectSet\":[{\"_typeName\":\"ObjectSpec\",\"obj\":{\"_typeName\":"
                 + "\"ManagedObjectReference\",\"value\":" + Json.quote(viewMoid)
                 + ",\"type\":\"ContainerView\"},\"skip\":true,"
@@ -196,7 +216,8 @@ final class Inventory {
                         Map<String, SimpleJson> hp = hosts.get(hm);
                         members.add(hp == null ? new Host(hm, null, null, null, null)
                                 : new Host(hm, str(hp, P_NAME), str(hp, P_NODE_UUID),
-                                        str(hp, P_CLUSTER_UUID), bool(hp, P_ENABLED)));
+                                        str(hp, P_CLUSTER_UUID), bool(hp, P_ENABLED),
+                                        moref(hp, P_VSAN_SYSTEM)));
                     }
                 }
                 out.add(new Cluster(c.getKey(), str(cp, P_NAME), members));
@@ -218,6 +239,39 @@ final class Inventory {
         SimpleJson v = props.get(key);
         if (v == null || v.isNull() || v.isObject() || v.isList()) return null;
         return v.asString();
+    }
+
+    /** A MoRef property's {@code value}, or {@code null}. */
+    private static String moref(Map<String, SimpleJson> props, String key) {
+        SimpleJson v = props.get(key);
+        if (v == null || !v.isObject()) return null;
+        return v.get("value").asString();
+    }
+
+    /**
+     * The non-empty {@code vsanUuid}s of a {@code QueryDisksForVsan} answer
+     * (a bare array of {@code VsanHostDiskResult}; P2). Keyed on non-empty
+     * {@code vsanUuid}, never on {@code state}: on ESA every disk, in use or
+     * not, reads {@code ineligible}.
+     *
+     * @throws IOException when the body is not a JSON array
+     */
+    static List<String> vsanDiskUuids(String body) throws IOException {
+        SimpleJson root;
+        try {
+            root = SimpleJson.parse(body);
+        } catch (RuntimeException e) {
+            throw new Unreadable("QueryDisksForVsan: the response is not valid JSON");
+        }
+        if (!root.isList()) {
+            throw new Unreadable("QueryDisksForVsan: the response is not an array of disk results");
+        }
+        List<String> out = new ArrayList<>();
+        for (SimpleJson r : root.asList()) {
+            String u = r.get("vsanUuid").asString();
+            if (u != null && !u.trim().isEmpty() && !out.contains(u)) out.add(u);
+        }
+        return out;
     }
 
     private static Boolean bool(Map<String, SimpleJson> props, String key) {

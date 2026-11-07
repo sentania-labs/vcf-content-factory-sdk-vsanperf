@@ -2,7 +2,12 @@ package com.vcfcf.adapters.vsanperf;
 
 import com.vcfcf.adapter.json.SimpleJson;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -23,10 +28,12 @@ import java.util.List;
  * {@code sampleInfo}; the literal {@code None} means no sample). An empty
  * type echoes the wildcard ({@code <type>:*}) with no {@code value}.
  *
- * <p><b>Value selection.</b> Per series, the newest non-{@code None}
- * token with its own timestamp; an all-{@code None} series yields no
- * sample (never a zero). Per-mille labels are converted here. A label not
- * in the catalog is dropped (the labels filter means none arrive).
+ * <p><b>Value selection (v2 "one bucket rule", replaces Build 1's newest
+ * token).</b> Per series, every non-{@code None} bucket in the window, each
+ * with its own timestamp; the engine pushes those newer than the
+ * per-(entity, label) mark. An all-{@code None} series yields no sample
+ * (never a zero). Per-mille labels are converted here. A label not in the
+ * catalog is dropped (the labels filter means none arrive).
  */
 final class PerfParser {
 
@@ -64,24 +71,40 @@ final class PerfParser {
         final List<Entity> entities;
         /** Wildcard echoes ({@code <type>:*}, no objects of the type). */
         final int echoes;
-        /** Entities whose id was unusable (another type, malformed pNIC id). */
+        /** Entities whose id was unusable (another type, a wrong part count). */
         final int malformed;
-        /** Series seen / series that produced a sample. */
+        /** The {@code |} part count of the first unusable id (for a WARN; never the id). */
+        final int malformedParts;
+        /** Series seen / series that produced at least one sample. */
         final int seriesSeen;
         final int seriesKept;
+        /** Samples (non-None buckets) kept over all series. */
+        final int samples;
 
-        Result(List<Entity> entities, int echoes, int malformed, int seriesSeen,
-                int seriesKept) {
+        Result(List<Entity> entities, int echoes, int malformed, int malformedParts,
+                int seriesSeen, int seriesKept, int samples) {
+            this.samples = samples;
             this.entities = Collections.unmodifiableList(entities);
             this.echoes = echoes;
             this.malformed = malformed;
+            this.malformedParts = malformedParts;
             this.seriesSeen = seriesSeen;
             this.seriesKept = seriesKept;
+        }
+
+        /**
+         * The type's empty answer (v2 B7): the wildcard echo and nothing
+         * else. A response with any entity, usable or not, is not empty.
+         */
+        boolean isEmptyEcho() {
+            return echoes > 0 && entities.isEmpty() && malformed == 0;
         }
     }
 
     /**
-     * Parse a 200 body.
+     * Parse a 200 body held as one string (whole-document parse). Kept for
+     * the tests, which check that it and the streaming parse give the same
+     * rows (v2 T1); collection uses {@link #parse(InputStream, EntityType)}.
      *
      * @throws IOException when the body is not JSON or not an array: an
      *         unreadable response, never an empty success
@@ -97,39 +120,99 @@ final class PerfParser {
             throw new Unreadable(type.id + ": the response is not a JSON array "
                     + "of entities; treated as unreadable");
         }
-        List<Entity> out = new ArrayList<>();
-        int echoes = 0;
-        int malformed = 0;
-        int seen = 0;
-        int kept = 0;
+        Acc acc = new Acc(type);
         for (SimpleJson e : root.asList()) {
-            String refId = e.get("entityRefId").asString();
-            SimpleJson series = e.get("value");
+            List<String[]> series = new ArrayList<>();
+            for (SimpleJson x : e.get("value").asList()) {
+                series.add(new String[] {x.get("metricId").get("label").asString(),
+                        x.get("values").asString()});
+            }
+            acc.entity(e.get("entityRefId").asString(), e.get("sampleInfo").asString(), series);
+        }
+        return acc.result();
+    }
+
+    /**
+     * Parse a 200 body from its decoded stream, one
+     * {@code VsanPerfEntityMetricCSV} at a time (v2 Sizing requirement 3):
+     * only the current entity is held as a tree, and what is kept of it is
+     * the compact samples. The result is returned only when the whole
+     * document parsed, so a stream cut mid-entity fails the call and nothing
+     * of the response is pushed.
+     *
+     * @throws IOException ({@link Unreadable}) when the body is not a JSON
+     *         array or is cut; an {@link IOException} from the stream itself
+     *         is passed on wrapped as {@link Unreadable}
+     */
+    static Result parse(InputStream decoded, EntityType type) throws IOException {
+        Acc acc = new Acc(type);
+        Reader r = new BufferedReader(new InputStreamReader(decoded, StandardCharsets.UTF_8),
+                16 * 1024);
+        try {
+            new JsonStream(r).forEachInArray(e -> {
+                List<String[]> series = new ArrayList<>();
+                for (Object x : JsonStream.list(JsonStream.get(e, "value"))) {
+                    series.add(new String[] {
+                            JsonStream.str(JsonStream.get(JsonStream.get(x, "metricId"), "label")),
+                            JsonStream.str(JsonStream.get(x, "values"))});
+                }
+                acc.entity(JsonStream.str(JsonStream.get(e, "entityRefId")),
+                        JsonStream.str(JsonStream.get(e, "sampleInfo")), series);
+            });
+        } catch (Unreadable u) {
+            throw new Unreadable(type.id + ": " + u.getMessage());
+        } catch (IOException io) {
+            throw new Unreadable(type.id + ": the response stream could not be read ("
+                    + io.getClass().getSimpleName() + ")");
+        }
+        return acc.result();
+    }
+
+    /** Accumulates entities of one response into compact samples (both parses). */
+    private static final class Acc {
+        private final EntityType type;
+        private final List<Entity> out = new ArrayList<>();
+        private int echoes;
+        private int malformed;
+        private int malformedParts;
+        private int seen;
+        private int kept;
+        private int samplesKept;
+
+        Acc(EntityType type) {
+            this.type = type;
+        }
+
+        /** One entity: its id, {@code sampleInfo}, and (label, values CSV) per series. */
+        void entity(String refId, String sampleInfo, List<String[]> series) {
             if (refId != null && refId.endsWith(":*")) {
                 echoes++;
-                continue;
+                return;
             }
             EntityRef ref = EntityRef.parse(refId, type);
             if (ref == null) {
-                malformed++;
-                continue;
+                if (malformed++ == 0) malformedParts = EntityRef.parts(refId);
+                return;
             }
-            long[] times = sampleTimes(e.get("sampleInfo").asString());
+            long[] times = sampleTimes(sampleInfo);
             List<Sample> samples = new ArrayList<>();
-            for (SimpleJson s : series.asList()) {
+            for (String[] s : series) {
                 seen++;
-                String label = s.get("metricId").get("label").asString();
-                EntityType.Metric metric = label == null ? null : type.metric(label);
+                EntityType.Metric metric = s[0] == null ? null : type.metric(s[0]);
                 if (metric == null) continue;
-                Sample sample = newest(metric, times, s.get("values").asString());
-                if (sample != null) {
-                    samples.add(sample);
+                List<Sample> b = buckets(metric, times, s[1]);
+                if (!b.isEmpty()) {
+                    samples.addAll(b);
+                    samplesKept += b.size();
                     kept++;
                 }
             }
             out.add(new Entity(ref, samples));
         }
-        return new Result(out, echoes, malformed, seen, kept);
+
+        Result result() {
+            return new Result(out, echoes, malformed, malformedParts, seen, kept, samplesKept);
+        }
     }
 
     /**
@@ -156,26 +239,28 @@ final class PerfParser {
     }
 
     /**
-     * The value with the newest usable timestamp, chosen by time, not by CSV
-     * position (review N3: every capture is ascending, but nothing promises
-     * it). {@code None}, blanks, non-numbers and non-finite numbers are
-     * skipped; on equal times the later position wins.
+     * Every usable bucket of one series, oldest first, one per timestamp
+     * (v2 one bucket rule). {@code None}, blanks, non-numbers and non-finite
+     * numbers are skipped, as is a token whose timestamp did not parse; on a
+     * repeated timestamp the later position wins. Order by time, not by CSV
+     * position (review N3: every capture is ascending, nothing promises it).
      */
-    static Sample newest(EntityType.Metric metric, long[] times, String values) {
-        if (values == null) return null;
+    static List<Sample> buckets(EntityType.Metric metric, long[] times, String values) {
+        if (values == null) return Collections.emptyList();
         String[] tokens = values.split(",", -1);
         int n = Math.min(tokens.length, times.length);
-        long bestTime = Long.MIN_VALUE;
-        Double best = null;
+        java.util.TreeMap<Long, Double> byTime = new java.util.TreeMap<>();
         for (int i = 0; i < n; i++) {
-            if (times[i] == Long.MIN_VALUE || times[i] < bestTime) continue;
+            if (times[i] == Long.MIN_VALUE) continue;
             Double v = number(tokens[i]);
-            if (v != null) {
-                bestTime = times[i];
-                best = v;
-            }
+            if (v != null) byTime.put(times[i], v);
         }
-        return best == null ? null : new Sample(metric, bestTime, metric.convert(best));
+        if (byTime.isEmpty()) return Collections.emptyList();
+        List<Sample> out = new ArrayList<>(byTime.size());
+        for (java.util.Map.Entry<Long, Double> e : byTime.entrySet()) {
+            out.add(new Sample(metric, e.getKey(), metric.convert(e.getValue())));
+        }
+        return out;
     }
 
     /** A finite number, or {@code null} for {@code None}, blank or junk. */

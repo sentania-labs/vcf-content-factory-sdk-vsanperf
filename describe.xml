@@ -7,11 +7,13 @@
   platform does not list the adapter instance among the resources it
   collects, so the cycle runs in collect() for that object, and an
   unreachable vCenter shows the account DOWN. The vSAN
-  metrics land on the vCenter adapter's own VMWARE HostSystem objects
-  through the Suite API (ARIA_OPS stitching), so they are not declared here:
+  metrics land on the vCenter adapter's own VMWARE HostSystem,
+  ClusterComputeResource (since build 10) and VirtualMachine (since build 11)
+  objects through the Suite API (ARIA_OPS stitching), so they are not declared here:
   a pak cannot declare keys for VMWARE kinds, and pushed keys carry no label
   or unit (the unit is in the key leaf instead). Key reference: REFERENCE.md.
-  Design: factory knowledge/designs/vsanperf-mp-v1.md.
+  Design: factory knowledge/designs/vsanperf-mp-v1.md and, from build 10,
+  vsanperf-mp-v2.md (host, cluster, disk and VM tiers).
 
   Identity: vcenter_host and cluster_include (identType 1), so shard
   instances against one vCenter are distinct accounts (design Q3).
@@ -60,6 +62,39 @@
 				<enum value="false" displayOrder="1"/>
 				<enum value="true" displayOrder="2"/>
 			</ResourceIdentifier>
+			<!-- Build 10 (design v2 "Settings"): tiers beyond the always-on
+			     core. An account saved before build 10 has no stored value and
+			     gets the default (on). identType 2: not part of identity. -->
+			<ResourceIdentifier key="tier_host" nameKey="13" type="string"
+			                    required="false" dispOrder="8" default="true" identType="2"
+			                    enum="true">
+				<enum value="true" displayOrder="1"/>
+				<enum value="false" displayOrder="2"/>
+			</ResourceIdentifier>
+			<ResourceIdentifier key="tier_cluster" nameKey="14" type="string"
+			                    required="false" dispOrder="9" default="true" identType="2"
+			                    enum="true">
+				<enum value="true" displayOrder="1"/>
+				<enum value="false" displayOrder="2"/>
+			</ResourceIdentifier>
+			<ResourceIdentifier key="exclude_types" nameKey="15" type="string"
+			                    required="false" dispOrder="10" default="" identType="2"/>
+			<!-- Build 11 (design v2 "Settings"): the disk and VM tiers, off by
+			     default; the VM tier's cadence (1 to 12, staggered per cluster). -->
+			<ResourceIdentifier key="tier_disk" nameKey="16" type="string"
+			                    required="false" dispOrder="11" default="false" identType="2"
+			                    enum="true">
+				<enum value="false" displayOrder="1"/>
+				<enum value="true" displayOrder="2"/>
+			</ResourceIdentifier>
+			<ResourceIdentifier key="tier_vm" nameKey="17" type="string"
+			                    required="false" dispOrder="12" default="false" identType="2"
+			                    enum="true">
+				<enum value="false" displayOrder="1"/>
+				<enum value="true" displayOrder="2"/>
+			</ResourceIdentifier>
+			<ResourceIdentifier key="vm_tier_every_n_cycles" nameKey="18" type="string"
+			                    required="false" dispOrder="13" default="3" identType="2"/>
 
 			<!-- Self-metrics (design Q4), delivered in the collect result. -->
 			<ResourceGroup key="Collection" nameKey="20" instanced="false">
@@ -87,6 +122,20 @@
 				                   isProperty="false" defaultMonitored="true" unit="ms"/>
 				<ResourceAttribute key="last_error" nameKey="32" dataType="string"
 				                   isProperty="true"/>
+				<!-- Build 10 (design v2). -->
+				<ResourceAttribute key="clusters_unresolved" nameKey="33" dataType="float"
+				                   isProperty="false" defaultMonitored="true"/>
+				<ResourceAttribute key="entities_unparsed" nameKey="34" dataType="float"
+				                   isProperty="false" defaultMonitored="true"/>
+				<!-- Build 11 (design v2; review W1). -->
+				<ResourceAttribute key="disks_unresolved" nameKey="35" dataType="float"
+				                   isProperty="false" defaultMonitored="true"/>
+				<ResourceAttribute key="vms_unresolved" nameKey="36" dataType="float"
+				                   isProperty="false" defaultMonitored="true"/>
+				<ResourceAttribute key="vdisks_unresolved" nameKey="37" dataType="float"
+				                   isProperty="false" defaultMonitored="true"/>
+				<ResourceAttribute key="optional_calls_failed" nameKey="38" dataType="float"
+				                   isProperty="false" defaultMonitored="true"/>
 			</ResourceGroup>
 		</ResourceKind>
 

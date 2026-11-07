@@ -10,9 +10,19 @@ import java.util.TreeSet;
 import java.util.Set;
 
 /**
- * VCF Operations resource ids of this vCenter's VMWARE HostSystem
- * objects, keyed by host MoRef, from the Suite API resource list (the
- * compliance {@code ComplianceStitcher} identity, build 102).
+ * VCF Operations resource ids of this vCenter's VMWARE HostSystem (or,
+ * since build 10, ClusterComputeResource) objects, keyed by MoRef, from the
+ * Suite API resource list (the compliance {@code ComplianceStitcher}
+ * identity, build 102).
+ *
+ * <p><b>ClusterComputeResource (build 10) and VirtualMachine (build 11).</b>
+ * Same identifiers as HostSystem, {@code VMEntityObjectID} +
+ * {@code VMEntityVCID}, both part of uniqueness on both kinds (design P2
+ * addendum: read on devel 9.0.2, (MoRef, VCID) matched 45 of 45 VMs, and a
+ * test push onto a cluster and a VM read back). The live read-back by this
+ * pak is still owed at T5. A row without them is never matched, so data is
+ * dropped (counted), never misplaced. {@code VMEntityInstanceUUID} is not
+ * used: it was empty on exactly the powered-on vSAN VMs on devel.
  *
  * <p><b>Identity.</b> A row is indexed only when it carries a resource id
  * ({@code identifier}), a {@code VMEntityObjectID} (MoRef) and a
@@ -38,6 +48,22 @@ final class OpsHostMap {
 
     static final int PAGE_SIZE = 5000;
     static final int MAX_PAGES = 40;
+    static final String HOST_SYSTEM = "HostSystem";
+    static final String CLUSTER = "ClusterComputeResource";
+    static final String VIRTUAL_MACHINE = "VirtualMachine";
+    /**
+     * VirtualMachine page size (v2 §VirtualMachine): ~2.9 KB per VM and not
+     * gzipped (P2), so 500 per page is ~1.45 MB through one parse.
+     */
+    static final int VM_PAGE_SIZE = 500;
+    /** 40,000 VMs at 500 per page. */
+    static final int VM_MAX_PAGES = 80;
+
+    /** Pages read to build this map (PERF identity). */
+    int pages;
+
+    /** The VMWARE resource kind indexed. */
+    final String kind;
 
     private final Map<String, String> byMoid;
     final int rows;
@@ -45,8 +71,9 @@ final class OpsHostMap {
     final int notIndexed;
     final Set<String> ambiguous;
 
-    private OpsHostMap(Map<String, String> byMoid, int rows, int otherVcenter, int notIndexed,
-            Set<String> ambiguous) {
+    private OpsHostMap(String kind, Map<String, String> byMoid, int rows, int otherVcenter,
+            int notIndexed, Set<String> ambiguous) {
+        this.kind = kind;
         this.byMoid = Collections.unmodifiableMap(byMoid);
         this.rows = rows;
         this.otherVcenter = otherVcenter;
@@ -63,10 +90,37 @@ final class OpsHostMap {
         return byMoid.size();
     }
 
-    /** The Suite API path for one page. */
+    /** The Suite API path for one page of HostSystem. */
     static String path(int page) {
-        return "/api/resources?adapterKind=VMWARE&resourceKind=HostSystem&pageSize="
-                + PAGE_SIZE + "&page=" + page;
+        return path(HOST_SYSTEM, page);
+    }
+
+    /** The Suite API path for one page of {@code kind}. */
+    static String path(String kind, int page) {
+        return "/api/resources?adapterKind=VMWARE&resourceKind=" + kind + "&pageSize="
+                + pageSize(kind) + "&page=" + page;
+    }
+
+    static int pageSize(String kind) {
+        return VIRTUAL_MACHINE.equals(kind) ? VM_PAGE_SIZE : PAGE_SIZE;
+    }
+
+    private static int maxPages(String kind) {
+        return VIRTUAL_MACHINE.equals(kind) ? VM_MAX_PAGES : MAX_PAGES;
+    }
+
+    /**
+     * One page; an {@link IOException} is retried once (P2: VCF Operations
+     * closes an idle keep-alive connection after about 30 s, so the first
+     * request of a cycle can meet a dropped connection).
+     */
+    private static String page(Getter get, String kind, int page)
+            throws IOException, InterruptedException {
+        try {
+            return get.get(path(kind, page));
+        } catch (IOException e) {
+            return get.get(path(kind, page));
+        }
     }
 
     /** Reads the paged list through {@code get}. */
@@ -83,6 +137,12 @@ final class OpsHostMap {
      *         list as complete
      */
     static OpsHostMap load(Getter get, String vcUuid) throws IOException, InterruptedException {
+        return load(get, vcUuid, HOST_SYSTEM);
+    }
+
+    /** {@link #load(Getter, String)} for another VMWARE kind with the same identifiers. */
+    static OpsHostMap load(Getter get, String vcUuid, String kind)
+            throws IOException, InterruptedException {
         if (vcUuid == null || vcUuid.isEmpty()) {
             throw new IOException("the vCenter instance UUID is unknown; hosts are matched on "
                     + "MoRef plus vCenter UUID only");
@@ -92,21 +152,23 @@ final class OpsHostMap {
         int rows = 0;
         int other = 0;
         int notIndexed = 0;
+        int pagesRead = 0;
         for (int page = 0; ; page++) {
-            if (page >= MAX_PAGES) {
-                throw new IOException("HostSystem list longer than " + MAX_PAGES + " pages");
+            pagesRead++;
+            if (page >= maxPages(kind)) {
+                throw new IOException(kind + " list longer than " + maxPages(kind) + " pages");
             }
             SimpleJson root;
             try {
-                root = SimpleJson.parse(get.get(path(page)));
+                root = SimpleJson.parse(page(get, kind, page));
             } catch (RuntimeException e) {
-                throw new IOException("HostSystem list page " + page + " is not valid JSON");
+                throw new IOException(kind + " list page " + page + " is not valid JSON");
             }
             SimpleJson list = root.get("resourceList");
             long total = root.get("pageInfo").get("totalCount").asLong();
             if (!list.isList()) {
                 if (!root.get("pageInfo").get("totalCount").isNull() && total == 0) break;
-                throw new IOException("HostSystem list page " + page + " has no resourceList");
+                throw new IOException(kind + " list page " + page + " has no resourceList");
             }
             int n = 0;
             for (SimpleJson r : list.asList()) {
@@ -131,6 +193,10 @@ final class OpsHostMap {
                 }
                 if (ambiguous.contains(moid)) continue;
                 if (byMoid.containsKey(moid)) {
+                    // Review N6 (build 11): offset paging over a list that changes
+                    // mid-read can return a row twice; the same resource id again is
+                    // not ambiguous, only a different id for the same MoRef is.
+                    if (id.equals(byMoid.get(moid))) continue;
                     byMoid.remove(moid);
                     ambiguous.add(moid);
                     continue;
@@ -141,16 +207,18 @@ final class OpsHostMap {
             if (!totalKnown) break; // no pageInfo: one page is the whole list
             if (rows >= total) break;
             if (n == 0) {
-                throw new IOException("HostSystem list ended after " + rows + " of " + total
+                throw new IOException(kind + " list ended after " + rows + " of " + total
                         + " rows");
             }
         }
-        return new OpsHostMap(byMoid, rows, other, notIndexed, ambiguous);
+        OpsHostMap m = new OpsHostMap(kind, byMoid, rows, other, notIndexed, ambiguous);
+        m.pages = pagesRead;
+        return m;
     }
 
     @Override
     public String toString() {
-        return size() + " HostSystem(s) of this vCenter indexed (" + rows + " rows; "
+        return size() + " " + kind + "(s) of this vCenter indexed (" + rows + " rows; "
                 + otherVcenter + " other vCenters; " + notIndexed + " not indexable; "
                 + ambiguous.size() + " ambiguous MoRef(s))";
     }

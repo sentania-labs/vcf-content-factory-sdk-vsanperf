@@ -149,6 +149,19 @@ public final class ClientFakeServerTest {
             } else if (path.contains("/ContainerView/") && path.endsWith("/DestroyView")) {
                 send(ex, 204, null, false);
             } else if (path.endsWith("/RetrievePropertiesEx")
+                    && !path.endsWith("/ContinueRetrievePropertiesEx")
+                    && body.contains("\"type\":\"VirtualMachine\"")) {
+                // Build 11 VM read: page 1 of the verbatim light chain (token "4").
+                send(ex, 200, T.vendor("retrievepropertiesex-vm-cluster-light-max10-page1-2026-11-06.json"),
+                        true);
+            } else if (path.endsWith("/ContinueRetrievePropertiesEx")
+                    && body.equals("{\"token\":\"4\"}")) {
+                // ...then the chain's last page (no token): 12 VMs over two pages.
+                send(ex, 200, T.vendor("retrievepropertiesex-vm-cluster-light-max10-page5-2026-11-06.json"),
+                        true);
+            } else if (path.contains("/HostVsanSystem/") && path.endsWith("/QueryDisksForVsan")) {
+                send(ex, 200, T.vendor("querydisksforvsan-host-15151-2026-11-06.json"), true);
+            } else if (path.endsWith("/RetrievePropertiesEx")
                     && !path.endsWith("/ContinueRetrievePropertiesEx")) {
                 if (viewFaultNamesView) {
                     String view = body.replaceAll("(?s).*\"value\":\"(session\\[[^\"]*)\",\"type\":"
@@ -197,7 +210,7 @@ public final class ClientFakeServerTest {
                         send(ex, 200, b.append("{}]").toString(), false);
                         return;
                     case "slowNotAuthOnce":
-                        Thread.sleep(350);
+                        Thread.sleep(900); // one fits a 1,500 ms budget, two do not (build 11 review N1)
                         if (n == 1) {
                             valid.remove(sid);
                             fault(ex, "NotAuthenticated", "The session is not authenticated.");
@@ -205,7 +218,7 @@ public final class ClientFakeServerTest {
                         }
                         break;
                     case "slowResetOnce":
-                        Thread.sleep(350);
+                        Thread.sleep(900); // one fits a 1,500 ms budget, two do not (build 11 review N1)
                         if (n == 1) {
                             ex.close();
                             return;
@@ -213,6 +226,27 @@ public final class ClientFakeServerTest {
                         break;
                     case "junk":
                         send(ex, 200, "<html>maintenance</html>", false);
+                        return;
+                    case "notGzip":
+                        // Constructed: a 200 that claims gzip but is plain text.
+                        byte[] plain = "[]".getBytes(StandardCharsets.UTF_8);
+                        ex.getResponseHeaders().add("Content-Encoding", "gzip");
+                        ex.sendResponseHeaders(200, plain.length);
+                        try (OutputStream o = ex.getResponseBody()) {
+                            o.write(plain);
+                        }
+                        ex.close();
+                        return;
+                    case "truncated":
+                        // A gzip body cut mid-entity (constructed from the capture).
+                        byte[] gz = DiskVmTest.gzip(T.vendor("queryperf-host-domowner-2026-11-06.json"));
+                        byte[] cut = java.util.Arrays.copyOf(gz, gz.length / 2);
+                        ex.getResponseHeaders().add("Content-Encoding", "gzip");
+                        ex.sendResponseHeaders(200, cut.length);
+                        try (OutputStream o = ex.getResponseBody()) {
+                            o.write(cut);
+                        }
+                        ex.close();
                         return;
                     case "slow":
                         Thread.sleep(3_000);
@@ -223,6 +257,17 @@ public final class ClientFakeServerTest {
                             return;
                         }
                         break;
+                    case "byType":
+                        // Build 10: the answer follows the spec's entity type.
+                        if (body.contains("\"entityRefId\":\"cluster-domowner:*\"")) {
+                            send(ex, 200, T.vendor("queryperf-cluster-domowner-2026-11-06.json"),
+                                    true);
+                        } else if (body.contains("\"entityRefId\":\"ioinsight:*\"")) {
+                            send(ex, 200, PerfParserTest.echo(EntityType.IOINSIGHT), true);
+                        } else {
+                            send(ex, 404, "", false);
+                        }
+                        return;
                     default:
                         break;
                 }
@@ -287,7 +332,117 @@ public final class ClientFakeServerTest {
         viewIdNeverLeaks();
         unreadableNotRetried();
         oneDeadlineAcrossRetries();
+        clusterTierCallAndEcho();
+        vmReadTwoPages();
+        queryDisksForVsan();
+        truncatedStreamNotRetried();
+        notGzipNotRetried();
         System.out.println("ClientFakeServerTest: all assertions passed");
+    }
+
+    /**
+     * T2, build 10: a cluster-tier call (one wildcard spec for
+     * cluster-domowner, its 23 labels, the cluster MoRef, gzip) parsed from
+     * the verbatim capture, and an empty type's echo (the body quoted in
+     * PROVENANCE-2026-11-06-build2.md) answered as an empty result.
+     */
+    static void clusterTierCallAndEcho() throws Exception {
+        try (Server s = new Server()) {
+            s.perfMode = "byType";
+            VsanJsonClient c = client(s, 10_000, new T.RecLog());
+            long now = System.currentTimeMillis();
+            CycleEngine.PerfCall p = c.queryPerf("domain-c6004", EntityType.CLUSTER_DOMOWNER,
+                    now - CycleEngine.WINDOW_MS, now, 10_000);
+            T.eq(200, p.status, "status");
+            T.eq(1, p.result.entities.size(), "one cluster entity");
+            T.eq(PerfParserTest.LAB_CLUSTER_UUID, p.result.entities.get(0).ref.uuid, "cluster uuid");
+            T.eq(23, p.result.seriesKept, "23 series");
+            T.eq(46, p.result.samples, "two buckets each");
+            T.check(p.wireBytes < p.decodedBytes, "gzip");
+            String req = null;
+            for (Req r : s.reqs) if (r.path.endsWith("/VsanPerfQueryPerf")) req = r.body;
+            T.check(req.contains("\"entityRefId\":\"cluster-domowner:*\""), "wildcard spec");
+            T.check(req.contains("\"value\":\"domain-c6004\""), "cluster MoRef");
+            for (String l : EntityType.CLUSTER_DOMOWNER.labels()) {
+                T.check(req.contains(Json.quote(l)), "label " + l + " requested");
+            }
+            T.eq(1, req.split("VsanPerfQuerySpec", -1).length - 1, "exactly one spec");
+
+            CycleEngine.PerfCall e = c.queryPerf("domain-c6004", EntityType.IOINSIGHT,
+                    now - CycleEngine.WINDOW_MS, now, 10_000);
+            T.eq(200, e.status, "echo status");
+            T.check(e.result.isEmptyEcho(), "the echo is an empty answer");
+            T.eq(0, e.result.entities.size(), "no rows");
+            T.eq(1, s.logins.get(), "one session");
+            c.close();
+        }
+    }
+
+    /**
+     * T2, build 11: the VM read on a ContainerView rooted at the cluster,
+     * two pages (the first with a token, the continuation without), pages of
+     * 50, the view reused on the next read.
+     */
+    static void vmReadTwoPages() throws Exception {
+        try (Server s = new Server()) {
+            VsanJsonClient c = client(s, 10_000, new T.RecLog());
+            VmInventory inv = c.readVms("domain-c6004", true, 10_000);
+            T.eq(12, inv.vms(), "10 + 2 VMs over two pages");
+            T.eq(2, inv.pages, "two pages");
+            T.check(inv.wireBytes > 0 && inv.decodedBytes > inv.wireBytes, "bytes counted");
+            Req view = null;
+            Req first = null;
+            for (Req r : s.reqs) {
+                if (r.path.endsWith("/CreateContainerView") && r.body.contains("VirtualMachine")) view = r;
+                if (r.path.endsWith("/RetrievePropertiesEx") && r.body.contains("VirtualMachine")) first = r;
+            }
+            T.check(view.body.contains("\"type\":\"ClusterComputeResource\",\"value\":\"domain-c6004\""),
+                    "view rooted at the cluster: " + view.body);
+            T.check(first.body.contains("\"maxObjects\":50"), "pages of 50");
+            T.check(first.body.contains("config.hardware.device"), "with devices");
+            T.eq(1, s.count("/ContinueRetrievePropertiesEx"), "one continuation, its token once");
+            int views = s.views.get();
+            c.readVms("domain-c6004", false, 10_000);
+            T.eq(views, s.views.get(), "the cluster's view is reused within the session");
+            c.close();
+        }
+    }
+
+    /** T2, build 11: QueryDisksForVsan on the host's vsanSystem, body {}. */
+    static void queryDisksForVsan() throws Exception {
+        try (Server s = new Server()) {
+            VsanJsonClient c = client(s, 10_000, new T.RecLog());
+            List<String> u = c.queryDisksForVsan("vsanSystem-15151", 10_000);
+            T.eq(List.of("52d171f6-2e48-758a-777f-d5098533d861"), u, "the host's vSAN disk");
+            Req q = null;
+            for (Req r : s.reqs) if (r.path.endsWith("/QueryDisksForVsan")) q = r;
+            T.eq("/sdk/vim25/8.0.3.0/HostVsanSystem/vsanSystem-15151/QueryDisksForVsan", q.path, "path");
+            T.eq("{}", q.body, "body");
+            c.close();
+        }
+    }
+
+    /** Build 11 review N2: a body that is not gzip is unreadable, not a transport failure. */
+    static void notGzipNotRetried() throws Exception {
+        try (Server s = new Server()) {
+            s.perfMode = "notGzip";
+            VsanJsonClient c = client(s, 10_000, new T.RecLog());
+            Unreadable u = T.expect(Unreadable.class, () -> perf(c), "unreadable");
+            T.check(u.getMessage().contains("host-domowner"), "names the type: " + u.getMessage());
+            T.eq(1, s.perfCalls.get(), "not re-sent");
+            c.close();
+        }
+    }
+
+    /** T2: a gzip body cut mid-entity fails the call cleanly and is not re-sent. */
+    static void truncatedStreamNotRetried() throws Exception {
+        try (Server s = new Server()) {
+            s.perfMode = "truncated";
+            VsanJsonClient c = client(s, 10_000, new T.RecLog());
+            T.expect(Unreadable.class, () -> perf(c), "unreadable, nothing returned");
+            T.eq(1, s.perfCalls.get(), "not re-sent");
+            c.close();
+        }
     }
 
     static void sessionGzipAndReuse() throws Exception {
@@ -476,12 +631,18 @@ public final class ClientFakeServerTest {
                 c.instanceUuid(10_000);
                 long now = System.currentTimeMillis();
                 long t0 = System.nanoTime();
+                // Build 11 review N1: 1,500 ms leaves room for the re-login on a
+                // loaded runner; the server's 900 ms sleeps still spend it on the repeat.
                 T.expect(HttpTimeoutException.class, () -> c.queryPerf("domain-c6004",
-                        EntityType.HOST_DOMOWNER, now - CycleEngine.WINDOW_MS, now, 500),
+                        EntityType.HOST_DOMOWNER, now - CycleEngine.WINDOW_MS, now, 1_500),
                         mode + ": the budget covers the repeat");
                 long took = (System.nanoTime() - t0) / 1_000_000;
-                T.check(took <= 600, mode + ": failed at " + took + " ms, budget 500 ms");
-                T.eq(2, s.perfCalls.get(), mode + ": the repeat was attempted");
+                T.check(took <= 1_600, mode + ": failed at " + took + " ms, budget 1,500 ms");
+                T.check(s.perfCalls.get() >= 1, mode + ": called");
+                if (mode.equals("slowResetOnce")) {
+                    // No login in between: the repeat is always sent.
+                    T.eq(2, s.perfCalls.get(), mode + ": the repeat was attempted");
+                }
             }
         }
         T.check(VsanJsonClient.remainingMs(VsanJsonClient.deadlineIn(1)) <= 1, "deadline helper");

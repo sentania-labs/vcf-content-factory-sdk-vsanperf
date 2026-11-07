@@ -6,19 +6,22 @@
 #   released      false while authoring; the official release is the .pak
 #                 CI builds on a v* git tag.
 #
-# Design: factory knowledge/designs/vsanperf-mp-v1.md (Build 1).
+# Design: factory knowledge/designs/vsanperf-mp-v1.md (Build 1) and
+# vsanperf-mp-v2.md (Build 2: host and cluster tiers from build 10, disk and
+# VM tiers from build 11).
 adapter_kind: vcfcf_vsanperf
 entry_class: com.vcfcf.adapters.vsanperf.VsanPerfAdapter
 name: VCF Content Factory vSAN Performance
 description: >
-  vSAN Performance Service metrics for DOM client, DOM owner and vSAN
-  physical NICs, read over the vSphere JSON API (one wildcard query per
-  entity type per cluster, a bounded pool across clusters) and stitched
-  onto the vCenter adapter's own VMWARE HostSystem objects as instanced
-  keys under "vSAN Perf". Creates no objects besides its adapter instance.
+  vSAN Performance Service metrics (DOM owner, DOM client and vSAN
+  physical NICs always; the host, cluster, disk and VM tiers by setting),
+  read over the vSphere JSON API (one wildcard query per entity type per
+  cluster, a bounded pool across clusters) and stitched onto the vCenter
+  adapter's own VMWARE HostSystem, ClusterComputeResource and
+  VirtualMachine objects as keys under "vSAN Perf". Creates no objects besides its adapter instance.
   Replaces the Python vsanhostmetrics pack at scale; distinct adapter kind,
   so the two run side by side.
-version: "1.0.0"
-build_number: 9
+version: "1.1.0"
+build_number: 12
 tier: 2
 released: false
