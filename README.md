@@ -67,7 +67,7 @@ to percent.
   times, the aggregate call rate and push times from the instance log
   (`PERF` lines).
 
-## Acceptance on each platform (before the first `v*` tag)
+## Acceptance on each platform (before each release)
 
 Install on VCF Operations 8.18, 9.0 and 9.1 (design T5) and check, on each:
 
@@ -114,7 +114,7 @@ rendering of `pNIC:vmnic1` (needs a logged-in browser) and check 4's
 collector log scan (needs a Cloud Proxy login). Neither credential is in
 the lab profile.
 
-## Open before the first `v*` tag
+## Open before the scale release (issue #6)
 
 - **Design T3, replay harness:** recorded per-type responses replayed per
   synthetic cluster with per-call latency and both call-ceiling models.

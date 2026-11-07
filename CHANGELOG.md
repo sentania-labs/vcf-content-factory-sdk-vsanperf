@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.0.9 (2026-11-06)
+
+- release: first release line (RULE-014: `0.x` is the hand-built preview line, releases are `1.x`). Same source as dev preview 0.0.0.9 (build 9). Baseline for external testing: host tier only (DOM Owner, DOM Client, pNIC onto VMWARE HostSystem); key names may still change before the scale release if the key tree is aligned with the vsanhostmetrics `cptvsan|` grammar. T3/T4 moved to issue #6.
+
 ## 0.1.0.9 (Unreleased)
 
 - fix(adapter): build 9, the cycle summary and the PERF timing lines reach
@@ -120,7 +124,7 @@
   - W2 (no stitched-key section in the generated docs) is a factory
     tooling gap, routed by the orchestrator; no pak change.
   - W3: design T3 (replay harness) and T4 (65 MB heap gate at 70 clusters)
-    are **open and gate the first `v*` tag** (README "Open before the first
+    are **open and gate the scale release, issue #6** (README "Open before the scale release
     v* tag", docs/overview.md Known Limitations). Not built this round.
   - N1: Stop Collecting is logged and counted as stopped, not as the cycle
     deadline or `clusters_timed_out`. N2: the perf-phase span is a per-cycle
