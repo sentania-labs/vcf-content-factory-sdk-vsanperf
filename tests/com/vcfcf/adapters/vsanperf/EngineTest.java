@@ -26,7 +26,7 @@ public final class EngineTest {
     static final String NULL_RESULT = "<null-result>";
 
     /** A scriptable vCenter. */
-    static final class FakeVc implements CycleEngine.VcenterApi {
+    static class FakeVc implements CycleEngine.VcenterApi {
         volatile String uuid = VC;
         volatile IOException loginFailure;
         volatile Inventory inventory;
@@ -42,10 +42,41 @@ public final class EngineTest {
             return uuid;
         }
 
-        @Override public Inventory readInventory(long t) throws IOException {
+        /** Whether the last inventory read asked for configManager.vsanSystem. */
+        volatile boolean lastWithVsanSystem;
+        /** vsanSystem moId to its disk uuids, or an exception (disk tier). */
+        final Map<String, Object> disks = new ConcurrentHashMap<>();
+        final AtomicInteger diskCalls = new AtomicInteger();
+        /** Cluster MoRef to its VM read pages (bodies), or an exception (VM tier). */
+        final Map<String, Object> vmPages = new ConcurrentHashMap<>();
+        final AtomicInteger vmReads = new AtomicInteger();
+        volatile boolean lastVmDevices;
+
+        @Override public Inventory readInventory(long t, boolean withVsanSystem) throws IOException {
+            lastWithVsanSystem = withVsanSystem;
             if (inventoryFailure != null) throw inventoryFailure;
             if (inventoryDefect != null) throw inventoryDefect;
             return inventory;
+        }
+
+        @SuppressWarnings("unchecked")
+        @Override public List<String> queryDisksForVsan(String vsanSystem, long t)
+                throws IOException {
+            diskCalls.incrementAndGet();
+            Object a = disks.get(vsanSystem);
+            if (a instanceof IOException) throw (IOException) a;
+            return a == null ? List.of() : (List<String>) a;
+        }
+
+        @Override public VmInventory readVms(String cluster, boolean withDevices, long t)
+                throws IOException {
+            vmReads.incrementAndGet();
+            lastVmDevices = withDevices;
+            Object a = vmPages.get(cluster);
+            if (a instanceof IOException) throw (IOException) a;
+            VmInventory.Builder b = new VmInventory.Builder(withDevices);
+            if (a != null) for (String page : (String[]) a) b.addPage(page);
+            return b.build();
         }
 
         @Override public CycleEngine.PerfCall queryPerf(String cluster, EntityType type, long s,
@@ -71,10 +102,20 @@ public final class EngineTest {
         }
     }
 
-    /** A recording Suite API: HostSystem rows for the given MoRefs, pushes recorded. */
+    /** A recording Suite API: HostSystem and ClusterComputeResource rows, pushes recorded. */
     static final class FakeOps implements CycleEngine.OpsApi {
         final Map<String, String> hosts = new LinkedHashMap<>();
+        /** Cluster MoRef to resource id, under {@link #VC}. */
+        final Map<String, String> clusters = new LinkedHashMap<>();
+        /** Extra ClusterComputeResource rows of another vCenter (same MoRefs). */
+        final Map<String, String> otherVcClusters = new LinkedHashMap<>();
         final AtomicInteger gets = new AtomicInteger();
+        final AtomicInteger clusterGets = new AtomicInteger();
+        final AtomicInteger vmGets = new AtomicInteger();
+        /** The VCID the host and cluster rows carry. */
+        volatile String vcid = VC;
+        /** The VirtualMachine list body served for every page (null: an empty list). */
+        volatile String vmList;
         final List<Long> pushTimes = Collections.synchronizedList(new ArrayList<>());
         final Map<String, Map<String, Double>> pushed = new ConcurrentHashMap<>();
         final AtomicInteger values = new AtomicInteger();
@@ -84,10 +125,27 @@ public final class EngineTest {
                 Collections.synchronizedList(new ArrayList<>());
 
         @Override public String get(String path) {
+            if (path.contains("resourceKind=VirtualMachine")) {
+                vmGets.incrementAndGet();
+                T.check(path.contains("pageSize=500"), "VM list paged at 500: " + path);
+                return vmList != null ? vmList : OpsHostMapTest.page(0);
+            }
+            if (path.contains("resourceKind=ClusterComputeResource")) {
+                clusterGets.incrementAndGet();
+                List<String> rows = new ArrayList<>();
+                for (Map.Entry<String, String> c : otherVcClusters.entrySet()) {
+                    rows.add(OpsHostMapTest.row(c.getValue(), c.getKey(), "VC-OTHER"));
+                }
+                for (Map.Entry<String, String> c : clusters.entrySet()) {
+                    rows.add(OpsHostMapTest.row(c.getValue(), c.getKey(), vcid));
+                }
+                return OpsHostMapTest.page(rows.size(), rows.toArray(new String[0]));
+            }
+            T.check(path.contains("resourceKind=HostSystem"), "host list path: " + path);
             gets.incrementAndGet();
             List<String> rows = new ArrayList<>();
             for (Map.Entry<String, String> h : hosts.entrySet()) {
-                rows.add(OpsHostMapTest.row(h.getValue(), h.getKey(), VC));
+                rows.add(OpsHostMapTest.row(h.getValue(), h.getKey(), vcid));
             }
             return OpsHostMapTest.page(rows.size(), rows.toArray(new String[0]));
         }
@@ -180,16 +238,17 @@ public final class EngineTest {
         T.eq(1, r.clustersInScope, "in scope");
         T.eq(1, r.clustersOk, "ok");
         T.eq(3, r.perfCalls, "three calls per cluster");
-        T.eq(390, r.seriesPushed, "390 series, the design's lab figure");
+        T.eq(780, r.seriesPushed, "390 series x the window's two buckets (v2 one bucket rule)");
         T.eq(0, r.hostsUnresolved, "all 5 hosts resolved");
         T.eq(5, ops.pushed.size(), "5 HostSystem resources");
-        T.eq(11, r.metrics().size(), "eleven self-metrics");
+        T.eq(0, ops.clusterGets.get(), "no cluster list read with the cluster tier off");
+        T.eq(17, r.metrics().size(), "seventeen self-metrics");
         T.eq("none", r.lastErrorProperty(), "no error");
         T.check(r.perfCallsPerSecond > 0, "call rate from the perf phase");
         T.check(r.perfCallMsAvg >= 0, "avg call ms");
         long t0230 = PerfParserTest.T0230;
         Map<String, Double> esx01 = ops.pushed.get("rid-host-6017");
-        T.eq(6 + 38 + 17 * 2, esx01.size(), "esx01: 6 + 38 + 2 NICs x 17 keys");
+        T.eq(2 * (6 + 38 + 17 * 2), esx01.size(), "esx01: 6 + 38 + 2 NICs x 17 keys, two buckets");
         T.check(esx01.containsKey("vSAN Perf|DOM Owner|latencyAvgWriteUs@" + t0230), "owner key");
         T.check(esx01.containsKey("vSAN Perf|DOM Client|iopsRead@" + t0230), "client key");
         T.check(esx01.containsKey("vSAN Perf|pNIC:vmnic1|rxErrPct@" + t0230), "pNIC key");
@@ -197,11 +256,11 @@ public final class EngineTest {
         PerfParser.Result pn = PerfParser.parse(T.vendor("queryperf-vsan-pnic-net-2026-11-06.json"),
                 EntityType.VSAN_PNIC_NET);
         for (PerfParser.Entity en : pn.entities) {
-            if (!en.ref.node.equals("69805090-5bba-3949-88f7-38052534dfcc")
+            if (!en.ref.uuid.equals("69805090-5bba-3949-88f7-38052534dfcc")
                     || !en.ref.instance.equals("vmnic1")) continue;
             for (PerfParser.Sample s : en.samples) {
-                T.near(s.value, esx01.get("vSAN Perf|pNIC:vmnic1|" + s.metric.leaf + "@" + t0230),
-                        "pushed " + s.metric.leaf);
+                T.near(s.value, esx01.get("vSAN Perf|pNIC:vmnic1|" + s.metric.leaf + "@"
+                        + s.timestamp), "pushed " + s.metric.leaf);
             }
         }
         T.check(log.count("PERF call ") == 3, "PERF call lines");
@@ -213,7 +272,7 @@ public final class EngineTest {
         int before = ops.values.get();
         CycleEngine.Result r2 = e.run(in(30_000));
         T.eq(0, r2.seriesPushed, "second cycle with the same buckets pushes nothing");
-        T.eq(390, r2.duplicatesSkipped, "all 390 recognised");
+        T.eq(780, r2.duplicatesSkipped, "all 780 recognised");
         T.eq(before, ops.values.get(), "no push call carried values");
         T.eq(1, ops.gets.get(), "Ops host map not re-read (no change, not the 12th cycle)");
     }
@@ -229,14 +288,14 @@ public final class EngineTest {
         vc.answers.put(LAB + "|host-domclient", "[" + entity(a, "02:25:00,02:30:00", "1,2") + ","
                 + entity(b, "02:20:00,02:25:00", "10,20") + "]");
         CycleEngine.Result r1 = e.run(in(30_000));
-        T.eq(2, r1.seriesPushed, "cycle 1: A@02:30, B@02:25");
+        T.eq(4, r1.seriesPushed, "cycle 1: A@02:25 and 02:30, B@02:20 and 02:25 (cold start)");
         vc.answers.put(LAB + "|host-domclient", "[" + entity(a, "02:25:00,02:30:00", "1,2") + ","
                 + entity(b, "02:25:00,02:30:00", "20,30") + "]");
         CycleEngine.Result r2 = e.run(in(30_000));
         T.eq(1, r2.seriesPushed, "cycle 2: B's late 02:30 bucket is still pushed");
         T.near(30, ops.pushed.get("rid-host-31189").get("vSAN Perf|DOM Client|iopsRead@"
                 + java.time.Instant.parse("2026-11-07T02:30:00Z").toEpochMilli()), "B@02:30");
-        T.eq(1, r2.duplicatesSkipped, "A's 02:30 not pushed twice");
+        T.eq(3, r2.duplicatesSkipped, "A's two buckets and B's 02:25 not pushed twice");
     }
 
     static String entity(String node, String times, String values) {
@@ -257,7 +316,7 @@ public final class EngineTest {
         CycleEngine.Result r = e.run(in(30_000));
         T.eq(null, r.failure, "a miss does not fail the cycle");
         T.eq(2, r.hostsUnresolved, "one unknown node + one host without an Ops object");
-        T.eq(38 * 4 + 17 * 8, r.seriesPushed, "the other 4 hosts' rows only");
+        T.eq(2 * (38 * 4 + 17 * 8), r.seriesPushed, "the other 4 hosts' rows only");
         T.eq(null, ops.pushed.get("rid-host-6011"), "nothing for the missing host");
         T.eq(1, log.count("match no host of the inventory"), "unknown node WARN");
         T.eq(1, log.count("have no VMWARE HostSystem object"), "Ops miss WARN");
@@ -316,7 +375,7 @@ public final class EngineTest {
         CycleEngine.Result r = engine(vc, ops, 1, 30_000, new T.RecLog(), "").run(in(30_000));
         T.eq(1, r.clustersTimedOut, "timed out cluster");
         T.eq(1, r.clustersOk, "the next cluster proceeds");
-        T.eq(390, r.seriesPushed, "its data is pushed");
+        T.eq(780, r.seriesPushed, "its data is pushed");
         T.eq(null, r.failure, "a timeout does not fail the cycle");
         T.eq(0, vc.calls("domain-c1", EntityType.HOST_DOMCLIENT), "rest of the slow cluster skipped");
     }
@@ -337,7 +396,7 @@ public final class EngineTest {
         T.check(took < 4_000, "the deadline ends the cycle (took " + took + " ms)");
         T.eq(1, r.clustersOk, "completed cluster");
         T.eq(2, r.clustersTimedOut, "running and unstarted clusters timed out");
-        T.eq(390, r.seriesPushed, "completed cluster still pushed");
+        T.eq(780, r.seriesPushed, "completed cluster still pushed");
         T.eq(null, r.failure, "a deadline does not fail the cycle");
         T.check(log.text().contains("cycle deadline reached"), "WARN");
     }
@@ -424,11 +483,11 @@ public final class EngineTest {
         ops.clean = false;
         CycleEngine e = engine(vc, ops, 4, 30_000, new T.RecLog(), "");
         CycleEngine.Result r1 = e.run(in(30_000));
-        T.eq(390, r1.seriesPushed, "first attempt");
+        T.eq(780, r1.seriesPushed, "first attempt");
         T.eq(0, e.marksSize(), "no mark recorded for an unclean push");
         ops.clean = true;
         CycleEngine.Result r2 = e.run(in(30_000));
-        T.eq(390, r2.seriesPushed, "re-sent while still in the window");
+        T.eq(780, r2.seriesPushed, "re-sent while still in the window");
         CycleEngine.Result r3 = e.run(in(30_000));
         T.eq(0, r3.seriesPushed, "marked after the clean push");
     }
@@ -455,8 +514,8 @@ public final class EngineTest {
         vc.answers.put(LAB + "|host-domclient", "[" + entA + ","
                 + entity(b, "02:20:00,02:25:00", "10,20") + "]");
         CycleEngine.Result r = engine(vc, ops, 2, 30_000, new T.RecLog(), "").run(in(30_000));
-        T.eq(3, r.seriesPushed, "three rows");
-        T.eq(2, ops.calls.size(), "one push call per sample time");
+        T.eq(5, r.seriesPushed, "five rows: every non-None bucket");
+        T.eq(3, ops.calls.size(), "one push call per sample time");
         Map<Long, Map<String, Map<String, Double>>> byTs = new LinkedHashMap<>();
         for (Map.Entry<Long, Map<String, Map<String, Double>>> c : ops.calls) {
             T.check(byTs.put(c.getKey(), c.getValue()) == null, "one call per time");
@@ -467,10 +526,14 @@ public final class EngineTest {
                 "A iopsRead under 02:30");
         T.eq(1, t0230.size(), "only A has a 02:30 row");
         T.eq(1, t0230.get("rid-host-6017").size(), "A's iopsWrite is not under 02:30");
+        T.near(1, t0225.get("rid-host-6017").get("vSAN Perf|DOM Client|iopsRead"),
+                "A iopsRead's older bucket under 02:25 too");
         T.near(5, t0225.get("rid-host-6017").get("vSAN Perf|DOM Client|iopsWrite"),
-                "A iopsWrite (newest non-None is the older bucket) under 02:25");
+                "A iopsWrite (None at 02:30) under 02:25");
         T.near(20, t0225.get("rid-host-31189").get("vSAN Perf|DOM Client|iopsRead"),
                 "lagging B under 02:25");
+        T.near(10, byTs.get(at("02:20:00")).get("rid-host-31189")
+                .get("vSAN Perf|DOM Client|iopsRead"), "B's 02:20 under its own time");
     }
 
     /**
@@ -490,13 +553,13 @@ public final class EngineTest {
         vc.answers.put(LAB + "|host-domclient", head + PerfParserTest.series("iopsRead", "5,6") + ","
                 + PerfParserTest.series("iopsWrite", "7,None") + "]}]");
         CycleEngine.Result r1 = e.run(in(30_000));
-        T.eq(2, r1.seriesPushed, "cycle 1: iopsRead@T, iopsWrite@T-300");
+        T.eq(3, r1.seriesPushed, "cycle 1: iopsRead@T-300 and T, iopsWrite@T-300");
         vc.answers.put(LAB + "|host-domclient", head + PerfParserTest.series("iopsRead", "5,6") + ","
                 + PerfParserTest.series("iopsWrite", "7,8") + "]}]");
         ops.calls.clear();
         CycleEngine.Result r2 = e.run(in(30_000));
         T.eq(1, r2.seriesPushed, "cycle 2: only iopsWrite's T value");
-        T.eq(1, r2.duplicatesSkipped, "iopsRead's T is not pushed twice");
+        T.eq(3, r2.duplicatesSkipped, "iopsRead's two buckets and iopsWrite's T-300 not again");
         T.eq(at("02:30:00"), ops.calls.get(0).getKey(), "under T");
         T.near(8, ops.calls.get(0).getValue().get("rid-host-6017")
                 .get("vSAN Perf|DOM Client|iopsWrite"), "iopsWrite's T value pushed");
@@ -558,7 +621,7 @@ public final class EngineTest {
         T.eq(0, ops.calls.size(), "no push");
         T.eq(0, vc.calls.size(), "no perf call");
         T.eq(thrown.getMessage(), got.get(CycleReport.LAST_ERROR), "last_error set");
-        T.eq(12, got.size(), "11 self-metrics and last_error");
+        T.eq(18, got.size(), "17 self-metrics and last_error");
         T.eq(0.0, got.get("Collection|clusters_ok"), "nothing collected");
         T.check(!thrown.getMessage().contains("svc") && !thrown.getMessage().contains("tok-"),
                 "credential-free");
@@ -568,7 +631,7 @@ public final class EngineTest {
         got.clear();
         CycleEngine.Result r = CycleReport.run(engine(ok, labOps(ok.inventory), 4, 30_000,
                 new T.RecLog(), ""), in(30_000), sink);
-        T.eq(390, r.seriesPushed, "healthy cycle");
+        T.eq(780, r.seriesPushed, "healthy cycle");
         T.eq("none", got.get(CycleReport.LAST_ERROR), "last_error none");
     }
 
@@ -586,9 +649,10 @@ public final class EngineTest {
         CycleReport.run(e, in(30_000), null);
         String healthy = log.text();
         T.check(healthy.contains("INFO cycle 1 summary: clusters ok=1 failed=0 timed_out=0 of 1; "
-                + "perf calls=3; series pushed=390"), "summary line: " + healthy);
-        T.check(healthy.contains("hosts unresolved=0; push batches ok=")
-                && healthy.contains(" s\n"), "summary carries hosts, batches, seconds");
+                + "perf calls=3; series pushed=780 (core 780; 0 already pushed); unresolved "
+                + "hosts=0 clusters=0; unparsed=0; learned skips=0; optional calls failed=0; push batches ok="),
+                "summary line: " + healthy);
+        T.check(healthy.contains(" s\n"), "summary carries seconds");
         T.eq(0, log.count("PERF "), "flag off: no PERF line");
 
         // The setting is re-read each cycle: on now, without a new engine.
@@ -629,12 +693,14 @@ public final class EngineTest {
         vc.answers.put("domain-c50|host-domclient", body.append(']').toString());
         FakeOps ops = labOps(vc.inventory);
         CycleEngine.Result r = engine(vc, ops, 1, 30_000, new T.RecLog(), "").run(in(30_000));
-        T.eq(150, r.seriesPushed, "all rows");
-        T.eq(2, ops.calls.size(), "split at 100 hosts");
-        T.eq(100, ops.calls.get(0).getValue().size(), "first call 100 hosts");
-        T.eq(50, ops.calls.get(1).getValue().size(), "rest");
-        T.eq(at("02:30:00"), ops.calls.get(0).getKey(), "same time");
-        T.eq(at("02:30:00"), ops.calls.get(1).getKey(), "same time");
+        T.eq(300, r.seriesPushed, "all rows, two buckets");
+        T.eq(4, ops.calls.size(), "split at 100 hosts, per time");
+        int t0230calls = 0;
+        for (Map.Entry<Long, Map<String, Map<String, Double>>> c : ops.calls) {
+            T.check(c.getValue().size() == 100 || c.getValue().size() == 50, "100 then 50");
+            if (c.getKey() == at("02:30:00")) t0230calls++;
+        }
+        T.eq(2, t0230calls, "the 02:30 group split in two calls");
     }
 
     static void filterAndNonVsan() throws Exception {

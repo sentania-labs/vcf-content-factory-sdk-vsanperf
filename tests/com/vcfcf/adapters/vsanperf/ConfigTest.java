@@ -1,7 +1,54 @@
 package com.vcfcf.adapters.vsanperf;
 
-/** T1: settings parsing, the cluster filter, credential masking. */
+/** T1: settings parsing, the tier settings, the cluster filter, credential masking. */
 public final class ConfigTest {
+
+    static VsanPerfConfig tiers(String host, String cluster, String exclude) {
+        return new VsanPerfConfig("vc", "u", "p", "", "", null, null, null, null, host, cluster,
+                exclude);
+    }
+
+    /** Build 10 (design v2 "Settings"). */
+    static void tiers() {
+        VsanPerfConfig d = cfg("vc", null, null, null, null);
+        T.check(d.tierHost && d.tierCluster, "an account saved before build 10: both tiers on");
+        T.eq(26, d.types.size(), "core + host + cluster types");
+        T.eq(EntityType.HOST_DOMOWNER, d.types.get(0), "collection order starts with core");
+        T.eq(EntityType.VSAN_CLUSTER_CAPACITY, d.types.get(3), "then the cluster tier");
+        T.eq(EntityType.CMMDS_NET, d.types.get(13), "then the host tier");
+        T.eq(16, tiers("true", "false", "").types.size(), "cluster tier off");
+        T.eq(13, tiers("FALSE", " true ", "").types.size(), "host tier off, any case");
+        T.eq(3, tiers("false", "false", null).types.size(), "both off: Build 1");
+        VsanPerfConfig ex = tiers(null, null, " ioinsight,VSAN-PNIC-NET , cache-dsk,bogus id");
+        T.eq(24, ex.types.size(), "two known types excluded, core included");
+        T.check(!ex.types.contains(EntityType.IOINSIGHT), "ioinsight out");
+        T.eq(java.util.List.of("cache-dsk", "bogus id"), ex.unknownExcludes,
+                "not in this build: a WARN, not an error");
+        String warn = ex.unknownExcludesWarning();
+        T.check(warn.contains("cache-dsk") && !warn.contains("bogus id"),
+                "the WARN echoes only id-shaped entries: " + warn);
+        T.expect(IllegalArgumentException.class, () -> tiers("false", "false",
+                "host-domowner,host-domclient,vsan-pnic-net"), "nothing left in scope");
+        T.expect(IllegalArgumentException.class, () -> tiers("yes", null, null), "strict flag");
+        T.check(d.toString().contains("tierHost=true tierCluster=true tierDisk=false tierVm=false "
+                + "vmEveryN=3 types=26"), "toString");
+        // Build 11: the disk and VM tiers, default off; the VM cadence.
+        T.check(!d.tierDisk && !d.tierVm, "disk and VM tiers off by default");
+        T.eq(3, d.vmEveryN, "VM every 3rd cycle by default");
+        VsanPerfConfig all = new VsanPerfConfig("vc", "u", "p", "", "", null, null, null, null,
+                null, null, "true", "true", "1", "");
+        T.eq(33, all.types.size(), "all tiers: 33 types");
+        T.eq(1, all.vmEveryN, "N = 1");
+        T.eq(EntityType.CACHE_DISK, all.types.get(26), "disk tier after the host tier");
+        T.eq(EntityType.VSCSI, all.types.get(32), "VM tier last");
+        T.expect(IllegalArgumentException.class, () -> new VsanPerfConfig("vc", "u", "p", "", "",
+                null, null, null, null, null, null, null, "true", "13", ""), "N over 12");
+        T.expect(IllegalArgumentException.class, () -> new VsanPerfConfig("vc", "u", "p", "", "",
+                null, null, null, null, null, null, null, "true", "0", ""), "N 0");
+        T.eq(31, new VsanPerfConfig("vc", "u", "p", "", "", null, null, null, null, null, null,
+                "true", "true", null, "virtual-disk,cache-disk").types.size(),
+                "disk and VM types can be excluded");
+    }
 
     static VsanPerfConfig cfg(String host, String workers, String timeout, String deadline,
             String perf) {
@@ -56,6 +103,8 @@ public final class ConfigTest {
         T.expect(IllegalArgumentException.class, () -> cfg("vc", null, "0", null, null), "timeout");
         T.expect(IllegalArgumentException.class, () -> new VsanPerfConfig("vc", "u", "", null, null,
                 null, null, null, null), "empty password");
+
+        tiers();
 
         ClusterFilter all = new ClusterFilter("", "");
         T.check(all.accepts("domain-c1", "Prod"), "empty include = all");

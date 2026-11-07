@@ -1,5 +1,114 @@
 # Changelog
 
+## 1.1.0.13 (Unreleased)
+
+- fix(adapter): build 13 (Codex on PR #8): a VM read that fails after an
+  earlier successful device read no longer lets `virtual-disk` run on the
+  stale device map (a moved disk could land on its old VM or bus position).
+  The failure is tracked per cluster: `virtual-disk` is not collected for
+  the cluster until a VM read succeeds, the read is retried on the cluster's
+  next VM run, and `virtual-machine` / `vscsi` keep using the previous read.
+  The WARN and REFERENCE.md say exactly that. New test
+  `DiskVmEngineTest.failedRefreshSuppressesVirtualDisk`.
+
+## 1.1.0.12 (Unreleased)
+
+- fix(adapter): build 12, every finding of the build 11 review. B1: the VM
+  device list is re-read every 12th VM run of a cluster even with no miss
+  (v2 device-list caching (b)), so a VMDK moved between two VMs or to
+  another bus position is placed right again within 12 runs (it kept
+  landing on the old VM); a path left unplaceable (seen on two VMs at read
+  time) also asks for the rate-limited re-read. W1: the VM read holds the one
+  VM permit, so one VM read page or one VM-type response is in memory across
+  the pool (`vm_permit_wait_ms_max` covers both). W2: when every host's
+  `QueryDisksForVsan` fails the cluster keeps an empty map and the retry
+  waits for the 12-cycle limit (was: 5 calls per cluster every cycle). N1:
+  `oneDeadlineAcrossRetries` budget 1,500 ms with 900 ms server sleeps, the
+  repeat required only for `slowResetOnce` (it failed under load, on `main`
+  too). N2: the gzip stream is opened inside the try, so a body that is not
+  gzip is Unreadable and not re-sent. N3: the QueryDisksForVsan WARN names
+  the first fault class. N4: `marks_bytes_est` counts the slot arrays as G1
+  humongous objects (VM tier at the example: 21.2 MB estimated and
+  measured; was 14.6 MB estimated). N5: `VsanPerfAdapter` class doc. N6: the
+  same Ops row on two pages is not ambiguous.
+
+## 1.1.0.11 (Unreleased)
+
+- feat(adapter): build 11, Build 2 round 2 (factory design
+  `knowledge/designs/vsanperf-mp-v2.md` with the P2 addendum): the disk tier
+  (`tier_disk`, default off; 4 types, 31 keys onto HostSystem instanced by
+  vSAN disk uuid; the disk-to-host map from one `QueryDisksForVsan` per host,
+  keyed on non-empty `vsanUuid`, cached and re-read every 12th cycle, on a
+  host-set change, or after a miss at most once per 12 cycles; R2 asks for
+  `configManager.vsanSystem` only with the tier on) and the VM tier
+  (`tier_vm`, default off; `vm_tier_every_n_cycles` default 3, staggered per
+  cluster; 3 types, 21 keys onto VirtualMachine resolved on
+  (`VMEntityObjectID`, `VMEntityVCID`) from the Ops VirtualMachine list at
+  500 per page; VMs from a ContainerView rooted at the cluster, 50 per page,
+  reduced page by page; `virtual-disk` and `vscsi` instanced by bus position
+  from `controllerKey` to the controller's `busNumber`, prefix `scsi`,
+  `nvme`, `sata` or `ide`, any other controller never guessed; the VM read is
+  re-run only after an instanceUuid or path miss, at most once per 12 cycles
+  per cluster; one VM-type call in flight per instance). Every perf response
+  is now parsed from the gzip stream one entity at a time (`parse=stream`),
+  with a 4 MB wire cap (16 MB for VM types) and no decoded cap; a stream cut
+  mid-entity fails the call and pushes nothing of it. The Ops resource list
+  read retries a page once (VCF Operations drops idle keep-alives after
+  ~30 s). New self-metrics `disks_unresolved`, `vms_unresolved`,
+  `vdisks_unresolved`, `optional_calls_failed`. 33 types, 451 keys.
+- fix(adapter): build 10 review. B1: `docs/overview.md` rewritten for the
+  tiers (it still described Build 1). W1: a cluster is FAILED only when a
+  core type fails, its object vanished, or every call fails; an optional
+  type's failure is counted per tier (`optional_calls_failed`, `PERF tier
+  failed=`), named in `last_error` and WARNed once per cluster and type per
+  refresh, and the cycle succeeds (a single faulting optional type on a
+  one-cluster account no longer shows it DOWN). W2: `docs/installing.md`
+  lists the tier settings. N1: fault-learned types re-probe with the same
+  per-(cluster, type) offset. N2: any cluster-map read restarts the miss rate
+  limit (no back-to-back reads), and a failed list read is named as the
+  cause in the WARN. N3: ClusterComputeResource identifiers described as
+  read in P2, live read-back still at T5. N4: describe comment and README
+  file list. N5: the wrong-form id WARN is once per type per day.
+- version: `1.1.0` (build 11). The scale release tag is to be `v1.1.0.11`
+  after T3, T4 and the three-platform proof. Lab calls per cycle: default
+  tiers 26 then 23; all tiers 33 then 28 on the cluster's VM cycle, 30 then
+  25 on the others.
+
+## 1.0.0.10 (Unreleased)
+
+- feat(adapter): build 10, Build 2 round 1 (factory design
+  `knowledge/designs/vsanperf-mp-v2.md`): the host tier (13 types, 149 keys
+  onto VMWARE HostSystem, `TCP/IP:<stack>`, `vNIC:<vmk>` and
+  `vNIC RDT Latency:<vmk>` instanced) and the cluster tier (10 types, 189
+  keys onto VMWARE ClusterComputeResource, resolved by (MoRef, VCID) through
+  a ClusterComputeResource list read like the HostSystem one; the
+  identifiers were assumed at build 10; since read on devel in the design's
+  P2 round, live read-back by this pak still at T5). `vsan-direct-cluster`,
+  `vsan-file-service` and `ioinsight` land per entity: cluster uuid on the
+  cluster, one node uuid of that cluster on the host, else skipped and
+  counted. New Advanced settings `tier_host` and `tier_cluster` (default
+  `true`, so an upgraded 1.0.0.9 account gets both) and `exclude_types`.
+  Every Build 1 key, the account identity and the collector identity are
+  unchanged. Behaviour changes for every tier: every non-empty bucket in the
+  window newer than the per-(entity, metric) mark is pushed (Build 1 pushed
+  only the newest), so a cold start pushes up to two buckets per series; an
+  empty answer is learned after 3 consecutive cycles for 24 h plus a
+  per-(cluster, type) offset under an hour, an empty re-probe re-learns at
+  once, core types and `ioinsight` are never learned; dedup marks moved to a
+  compact hashed table (~0.7 MB instead of ~13.6 MB at the 70-cluster
+  example, `WatermarksTest`). New self-metrics `Collection|clusters_unresolved`
+  and `Collection|entities_unparsed`; the cycle summary gains per-tier series
+  and the new counts; PERF lines gain `tier=`, `calls_by_tier`, `kind=`,
+  `PERF tier`, `PERF identity read=ops_clusters`, and marks size on
+  `PERF cycle`. Lab with default tiers: 26 calls per cycle, 23 once the
+  empty types are learned; 1,186 series per cycle. Tests: 19 new verbatim
+  fixtures (PROVENANCE-2026-11-06-build2), the 338 keys row for row against
+  a copy of the v2 tables, id forms, the cluster resolver with one MoRef in
+  two vCenters, the learned-empty state machine, compact marks memory, a
+  cluster-tier call and an empty echo over the fake server. Not in this
+  build: the disk and VM tiers (blocked on design P2), streaming parse
+  (`parse=tree` in PERF call).
+
 ## 1.0.0.9 (2026-11-06)
 
 - release: first release line (RULE-014: `0.x` is the hand-built preview line, releases are `1.x`). Same source as dev preview 0.0.0.9 (build 9). Baseline for external testing: host tier only (DOM Owner, DOM Client, pNIC onto VMWARE HostSystem); key names may still change before the scale release if the key tree is aligned with the vsanhostmetrics `cptvsan|` grammar. T3/T4 moved to issue #6.

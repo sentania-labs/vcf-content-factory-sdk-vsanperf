@@ -58,6 +58,19 @@ public final class OpsHostMapTest {
                 "an empty list with total 0 is complete");
         T.expect(java.io.IOException.class, () -> OpsHostMap.load(p -> page(0), ""),
                 "no vCenter uuid: refused");
+        // Build 11 review N6: the same row on two pages (offset paging over a
+        // changing list) is not ambiguous; a different id for the MoRef is.
+        String[] repeat = {page(3, row("r1", "vm-1", "VC-A"), row("r2", "vm-2", "VC-A")),
+                page(3, row("r2", "vm-2", "VC-A"))};
+        OpsHostMap rp = OpsHostMap.load(p -> repeat[p.endsWith("page=0") ? 0 : 1], "VC-A",
+                OpsHostMap.VIRTUAL_MACHINE);
+        T.eq("r2", rp.resourceId("vm-2"), "a repeated row still resolves");
+        T.eq(0, rp.ambiguous.size(), "not ambiguous");
+        String[] clash = {page(3, row("r1", "vm-1", "VC-A"), row("r2", "vm-2", "VC-A")),
+                page(3, row("r9", "vm-2", "VC-A"))};
+        OpsHostMap cl = OpsHostMap.load(p -> clash[p.endsWith("page=0") ? 0 : 1], "VC-A",
+                OpsHostMap.VIRTUAL_MACHINE);
+        T.eq(null, cl.resourceId("vm-2"), "two ids for one MoRef: neither");
         System.out.println("OpsHostMapTest: all assertions passed");
     }
 }

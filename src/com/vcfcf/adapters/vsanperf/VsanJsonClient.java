@@ -20,7 +20,10 @@ import java.util.regex.Pattern;
 
 /**
  * The vSphere JSON API client: vim25 session, ServiceContent, the cluster
- * inventory read and the vSAN {@code VsanPerfQueryPerf} call. Plain JDK
+ * inventory read, the vSAN {@code VsanPerfQueryPerf} call (parsed from the
+ * gzip stream one entity at a time, build 11), the per-host
+ * {@code QueryDisksForVsan} (disk tier) and the per-cluster VM read (VM
+ * tier). Plain JDK
  * {@link HttpClient} (no vSAN or vim25 SDK jars), on the platform TLS
  * context the adapter passes in; no VCF Ops SDK type, so the fake-server
  * tests drive it directly.
@@ -75,6 +78,9 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
         final String viewManager;
         /** The ContainerView of clusters; session scoped, created on first use. */
         volatile String clusterView;
+        /** Per cluster MoRef, a ContainerView of its VMs (VM tier); session scoped. */
+        final java.util.concurrent.ConcurrentHashMap<String, String> vmViews =
+                new java.util.concurrent.ConcurrentHashMap<>();
 
         Session(String token, String instanceUuid, String apiVersion, String fullName,
                 String rootFolder, String propertyCollector, String viewManager) {
@@ -298,9 +304,10 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
     static final int MAX_INVENTORY_PAGES = 100;
 
     @Override
-    public Inventory readInventory(long timeoutMs) throws IOException, InterruptedException {
+    public Inventory readInventory(long timeoutMs, boolean withVsanSystem)
+            throws IOException, InterruptedException {
         long deadline = deadlineIn(timeoutMs);
-        return authenticated(deadline, s -> readInventory(s, deadline, true));
+        return authenticated(deadline, s -> readInventory(s, deadline, true, withVsanSystem));
     }
 
     /** Pages read by the last inventory read (for the PERF inventory line). */
@@ -318,8 +325,8 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
      * ignored), creates a new one and reads once more. The view moId embeds
      * the vCenter session key: it is never logged or put in a message.
      */
-    private Inventory readInventory(Session s, long deadline, boolean mayRecreateView)
-            throws IOException, InterruptedException {
+    private Inventory readInventory(Session s, long deadline, boolean mayRecreateView,
+            boolean withVsanSystem) throws IOException, InterruptedException {
         if (s.rootFolder == null || s.propertyCollector == null || s.viewManager == null) {
             throw new IOException("ServiceInstance content names no rootFolder, "
                     + "propertyCollector or viewManager");
@@ -330,7 +337,7 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
             s.clusterView = view;
         }
         try {
-            return retrieveAll(s, view, deadline);
+            return retrieveAll(s, view, deadline, withVsanSystem);
         } catch (VsanFault f) {
             if (f.is(VsanFault.NOT_AUTHENTICATED)) throw f;
             if (!mayRecreateView) {
@@ -343,15 +350,15 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
                     + "); recreating the view and reading once more");
             s.clusterView = null;
             destroyView(s, view, deadline);
-            return readInventory(s, deadline, false);
+            return readInventory(s, deadline, false, withVsanSystem);
         }
     }
 
-    private Inventory retrieveAll(Session s, String view, long deadline)
+    private Inventory retrieveAll(Session s, String view, long deadline, boolean withVsanSystem)
             throws IOException, InterruptedException {
         Inventory.Builder b = new Inventory.Builder();
         Reply r = exchange("POST", vim("PropertyCollector/" + s.propertyCollector
-                + "/RetrievePropertiesEx"), Inventory.retrieveBody(view), s.token,
+                + "/RetrievePropertiesEx"), Inventory.retrieveBody(view, withVsanSystem), s.token,
                 deadline, "RetrievePropertiesEx");
         String token = b.addPage(r.body);
         int pages = 1;
@@ -396,9 +403,15 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
 
     private String createClusterView(Session s, long deadline)
             throws IOException, InterruptedException {
-        String body = "{\"container\":{\"_typeName\":\"ManagedObjectReference\",\"type\":\"Folder\","
-                + "\"value\":" + Json.quote(s.rootFolder) + "},\"type\":[\"ClusterComputeResource\"],"
-                + "\"recursive\":true}";
+        return createView(s, "Folder", s.rootFolder, "ClusterComputeResource", deadline);
+    }
+
+    /** {@code CreateContainerView} of {@code type} objects under a container; the id is never logged. */
+    private String createView(Session s, String containerType, String container, String type,
+            long deadline) throws IOException, InterruptedException {
+        String body = "{\"container\":{\"_typeName\":\"ManagedObjectReference\",\"type\":"
+                + Json.quote(containerType) + ",\"value\":" + Json.quote(container) + "},"
+                + "\"type\":[" + Json.quote(type) + "],\"recursive\":true}";
         Reply r = exchange("POST", vim("ViewManager/" + s.viewManager + "/CreateContainerView"),
                 body, s.token, deadline, "CreateContainerView");
         String v;
@@ -449,14 +462,141 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
         long deadline = deadlineIn(timeoutMs);
         String body = perfBody(type, clusterMoid, startMs, endMs);
         return authenticated(deadline, s -> {
-            Reply r = exchange("POST", perfPath(), body, s.token, deadline,
-                    "VsanPerfQueryPerf " + type.id);
-            if (r.body == null) {
+            Raw raw = send("POST", perfPath(), body, s.token, deadline,
+                    "VsanPerfQueryPerf " + type.id, type.wireCap());
+            if (raw.status != 200) {
+                failure(raw, "VsanPerfQueryPerf " + type.id);
+            }
+            if (raw.body == null || raw.body.bytes == null) {
                 throw new Unreadable("VsanPerfQueryPerf " + type.id + " returned no body");
             }
-            PerfParser.Result parsed = PerfParser.parse(r.body, type);
-            return new CycleEngine.PerfCall(parsed, r.status, r.wireBytes, r.decodedBytes);
+            // v2 Sizing requirement 3: parse from the (gzip) stream one entity
+            // at a time; only the wire bytes are held, under the type's cap.
+            PerfParser.Result parsed;
+            CountingInput counted = null;
+            try {
+                // Review N2 (build 11): the gzip header is read here, inside the
+                // try, so a body that is not gzip or is too short is Unreadable
+                // (never re-sent as a transport failure).
+                counted = new CountingInput(raw.gzip
+                        ? new java.util.zip.GZIPInputStream(
+                                new java.io.ByteArrayInputStream(raw.body.bytes), 8192)
+                        : new java.io.ByteArrayInputStream(raw.body.bytes));
+                try (java.io.InputStream in = counted) {
+                    parsed = PerfParser.parse(in, type);
+                }
+            } catch (Unreadable u) {
+                throw u;
+            } catch (IOException e) {
+                throw new Unreadable("VsanPerfQueryPerf " + type.id + ": the gzip body could not "
+                        + "be read (" + e.getClass().getSimpleName() + ")");
+            }
+            return new CycleEngine.PerfCall(parsed, raw.status, raw.body.bytes.length,
+                    counted.count);
         });
+    }
+
+    /** Counts the decoded bytes read (PERF call {@code decoded_bytes}). */
+    private static final class CountingInput extends java.io.FilterInputStream {
+        long count;
+
+        CountingInput(java.io.InputStream in) {
+            super(in);
+        }
+
+        @Override public int read() throws IOException {
+            int c = super.read();
+            if (c >= 0) count++;
+            return c;
+        }
+
+        @Override public int read(byte[] b, int off, int len) throws IOException {
+            int n = super.read(b, off, len);
+            if (n > 0) count += n;
+            return n;
+        }
+    }
+
+    /** The {@code QueryDisksForVsan} path for a host's {@code configManager.vsanSystem}. */
+    String disksPath(String vsanSystemMoid) {
+        return vim("HostVsanSystem/" + pathSegment(vsanSystemMoid) + "/QueryDisksForVsan");
+    }
+
+    /**
+     * {@code QueryDisksForVsan} on one host (P2: body {@code {}}, a bare
+     * array of {@code VsanHostDiskResult}): the host's non-empty vSAN disk
+     * uuids.
+     */
+    @Override
+    public java.util.List<String> queryDisksForVsan(String vsanSystemMoid, long timeoutMs)
+            throws IOException, InterruptedException {
+        long deadline = deadlineIn(timeoutMs);
+        return authenticated(deadline, s -> {
+            Reply r = exchange("POST", disksPath(vsanSystemMoid), "{}", s.token, deadline,
+                    "QueryDisksForVsan");
+            if (r.body == null) throw new Unreadable("QueryDisksForVsan returned no body");
+            return Inventory.vsanDiskUuids(r.body);
+        });
+    }
+
+    /**
+     * The VM read for one cluster (VM tier, P2): a session-lived
+     * ContainerView rooted at the cluster, {@code RetrievePropertiesEx} in
+     * pages of {@link VmInventory#PAGE}, each page reduced at once. A fault
+     * on the read (other than {@code NotAuthenticated}) destroys the view,
+     * creates a new one and reads once more, as the inventory read does.
+     */
+    @Override
+    public VmInventory readVms(String clusterMoid, boolean withDevices, long timeoutMs)
+            throws IOException, InterruptedException {
+        long deadline = deadlineIn(timeoutMs);
+        return authenticated(deadline, s -> readVms(s, clusterMoid, withDevices, deadline, true));
+    }
+
+    private VmInventory readVms(Session s, String clusterMoid, boolean withDevices, long deadline,
+            boolean mayRecreateView) throws IOException, InterruptedException {
+        if (s.propertyCollector == null || s.viewManager == null) {
+            throw new IOException("ServiceInstance content names no propertyCollector or "
+                    + "viewManager");
+        }
+        String view = s.vmViews.get(clusterMoid);
+        if (view == null) {
+            view = createView(s, "ClusterComputeResource", clusterMoid, "VirtualMachine",
+                    deadline);
+            s.vmViews.put(clusterMoid, view);
+        }
+        try {
+            VmInventory.Builder b = new VmInventory.Builder(withDevices);
+            Reply r = exchange("POST", vim("PropertyCollector/" + s.propertyCollector
+                    + "/RetrievePropertiesEx"), VmInventory.retrieveBody(view, withDevices),
+                    s.token, deadline, "RetrievePropertiesEx (VMs)");
+            b.bytes(r.wireBytes, r.decodedBytes);
+            String token = b.addPage(r.body);
+            int pages = 1;
+            while (token != null) {
+                if (++pages > VmInventory.MAX_PAGES) {
+                    throw new IOException("VM read: more than " + VmInventory.MAX_PAGES
+                            + " pages; read refused as incomplete");
+                }
+                r = exchange("POST", vim("PropertyCollector/" + s.propertyCollector
+                        + "/ContinueRetrievePropertiesEx"), "{\"token\":" + Json.quote(token)
+                        + "}", s.token, deadline, "ContinueRetrievePropertiesEx (VMs)");
+                b.bytes(r.wireBytes, r.decodedBytes);
+                token = b.addPage(r.body);
+            }
+            return b.build();
+        } catch (VsanFault f) {
+            if (f.is(VsanFault.NOT_AUTHENTICATED)) throw f;
+            if (!mayRecreateView) {
+                throw new VsanFault(f.faultClass, "the VM read on the cluster's view failed "
+                        + "after the view was recreated", f.keys, f.httpStatus);
+            }
+            log.warn("VM read on a cluster's view failed (" + f.faultClass
+                    + "); recreating the view and reading once more");
+            s.vmViews.remove(clusterMoid, view);
+            destroyView(s, view, deadline);
+            return readVms(s, clusterMoid, withDevices, deadline, false);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -549,6 +689,60 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
      */
     Reply exchange(String method, String path, String body, String token, long deadline,
             String what) throws IOException, InterruptedException {
+        Raw raw = send(method, path, body, token, deadline, what, CappedBody.WIRE_CAP);
+        int status = raw.status;
+        long decodedCap = status == 200 ? CappedBody.DECODED_CAP : CappedBody.FAULT_CAP;
+        String text = null;
+        long wire = 0;
+        if (raw.body != null && raw.body.bytes != null) {
+            wire = raw.body.bytes.length;
+            text = CappedBody.decode(raw.body.bytes, raw.gzip, decodedCap);
+            if (text == null) {
+                if (status == 200) throw new OverCapException(what + " (decoded)", decodedCap);
+                throw new StatusException(what, status);
+            }
+        }
+        long decoded = text == null ? 0 : text.length();
+        if (status == 200 || status == 204) {
+            return new Reply(status, text, raw.sessionId, wire, decoded);
+        }
+        VsanFault fault = VsanFault.parse(text, status);
+        if (fault != null) throw fault;
+        throw new StatusException(what, status);
+    }
+
+    /** A sent request's status and raw (still encoded) body. */
+    private static final class Raw {
+        final int status;
+        final CappedBody.Body body;
+        final boolean gzip;
+        final String sessionId; // REDACT-SECRET
+
+        Raw(int status, CappedBody.Body body, boolean gzip, String sessionId) {
+            this.status = status;
+            this.body = body;
+            this.gzip = gzip;
+            this.sessionId = sessionId;
+        }
+    }
+
+    /** A non-200 answer to a streamed call: its fault, or the status. */
+    private static void failure(Raw raw, String what) throws IOException {
+        String text = raw.body == null || raw.body.bytes == null ? null
+                : CappedBody.decode(raw.body.bytes, raw.gzip, CappedBody.FAULT_CAP);
+        if (raw.status == 204) throw new Unreadable(what + " returned no body");
+        VsanFault fault = VsanFault.parse(text, raw.status);
+        if (fault != null) throw fault;
+        throw new StatusException(what, raw.status);
+    }
+
+    /**
+     * Send one request and read its body raw, a 200 body up to
+     * {@code okCap} wire bytes (over it: {@link OverCapException}), an error
+     * body up to the fault cap.
+     */
+    private Raw send(String method, String path, String body, String token, long deadline,
+            String what, long okCap) throws IOException, InterruptedException {
         long left = remainingMs(deadline);
         if (left <= 0) {
             throw new HttpTimeoutException(what + ": the call's time budget is spent");
@@ -566,7 +760,7 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
             rb.GET();
         }
         CompletableFuture<HttpResponse<CappedBody.Body>> f =
-                http.sendAsync(rb.build(), new CappedBody());
+                http.sendAsync(rb.build(), new CappedBody(okCap, CappedBody.FAULT_CAP));
         HttpResponse<CappedBody.Body> resp;
         try {
             resp = f.get(budget, TimeUnit.MILLISECONDS);
@@ -590,29 +784,11 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
         int status = resp.statusCode();
         CappedBody.Body raw = resp.body();
         boolean gzip = CappedBody.isGzip(resp.headers().firstValue("Content-Encoding").orElse(null));
-        long cap = status == 200 ? CappedBody.WIRE_CAP : CappedBody.FAULT_CAP;
+        long cap = status == 200 ? okCap : CappedBody.FAULT_CAP;
         if (raw != null && raw.overCap) {
             if (status == 200) throw new OverCapException(what, cap);
             throw new StatusException(what, status);
         }
-        long decodedCap = status == 200 ? CappedBody.DECODED_CAP : CappedBody.FAULT_CAP;
-        String text = null;
-        long wire = 0;
-        if (raw != null && raw.bytes != null) {
-            wire = raw.bytes.length;
-            text = CappedBody.decode(raw.bytes, gzip, decodedCap);
-            if (text == null) {
-                if (status == 200) throw new OverCapException(what + " (decoded)", decodedCap);
-                throw new StatusException(what, status);
-            }
-        }
-        long decoded = text == null ? 0 : text.length();
-        if (status == 200 || status == 204) {
-            String sid = resp.headers().firstValue(SESSION_HEADER).orElse(null);
-            return new Reply(status, text, sid, wire, decoded);
-        }
-        VsanFault fault = VsanFault.parse(text, status);
-        if (fault != null) throw fault;
-        throw new StatusException(what, status);
+        return new Raw(status, raw, gzip, resp.headers().firstValue(SESSION_HEADER).orElse(null));
     }
 }

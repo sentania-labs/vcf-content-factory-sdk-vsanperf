@@ -2,6 +2,12 @@ package com.vcfcf.adapters.vsanperf;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -26,6 +32,8 @@ final class VsanPerfConfig {
     static final int DEADLINE_MARGIN_S = 60;
     /** Deadline floor, so a 1-minute interval still gets a usable cycle. */
     static final int MIN_DEADLINE_S = 30;
+    static final int DEFAULT_VM_EVERY_N = 3;
+    static final int MAX_VM_EVERY_N = 12;
 
     /** As entered ({@code host} or {@code host:port}): also the TLS name-check host. */
     final String vcenterHost;
@@ -38,6 +46,20 @@ final class VsanPerfConfig {
     /** 0 = the collection interval minus 60 s. */
     final int cycleDeadlineSeconds;
     final boolean perfTimingLogging;
+    /** Build 10 (v2 "Settings"): the host tier, default on. */
+    final boolean tierHost;
+    /** Build 10: the cluster tier, default on. */
+    final boolean tierCluster;
+    /** Build 11: the disk tier, default off. */
+    final boolean tierDisk;
+    /** Build 11: the VM tier, default off. */
+    final boolean tierVm;
+    /** Build 11: the VM tier runs on every Nth cycle per cluster, staggered (1 to 12, default 3). */
+    final int vmEveryN;
+    /** The entity types this instance queries, in collection order (never empty). */
+    final List<EntityType> types;
+    /** Entity type ids in Entity types to exclude that this build does not know (configure WARN). */
+    final List<String> unknownExcludes;
     private final String baseUrl;
 
     private static final Pattern HOSTNAME = Pattern.compile(
@@ -49,6 +71,21 @@ final class VsanPerfConfig {
     VsanPerfConfig(String vcenterHost, String username, String password, String include,
             String exclude, String workers, String callTimeout, String cycleDeadline,
             String perfTiming) {
+        this(vcenterHost, username, password, include, exclude, workers, callTimeout,
+                cycleDeadline, perfTiming, null, null, null);
+    }
+
+    VsanPerfConfig(String vcenterHost, String username, String password, String include,
+            String exclude, String workers, String callTimeout, String cycleDeadline,
+            String perfTiming, String tierHost, String tierCluster, String excludeTypes) {
+        this(vcenterHost, username, password, include, exclude, workers, callTimeout,
+                cycleDeadline, perfTiming, tierHost, tierCluster, null, null, null, excludeTypes);
+    }
+
+    VsanPerfConfig(String vcenterHost, String username, String password, String include,
+            String exclude, String workers, String callTimeout, String cycleDeadline,
+            String perfTiming, String tierHost, String tierCluster, String tierDisk,
+            String tierVm, String vmEveryN, String excludeTypes) {
         this.vcenterHost = validHost(vcenterHost);
         this.baseUrl = buildBaseUrl(this.vcenterHost);
         if (username == null || username.trim().isEmpty()) {
@@ -66,6 +103,65 @@ final class VsanPerfConfig {
                 MAX_CALL_TIMEOUT_S, "Call timeout (s)");
         this.cycleDeadlineSeconds = intSetting(cycleDeadline, 0, 0, 86_400, "Cycle deadline (s)");
         this.perfTimingLogging = parseFlag(perfTiming);
+        this.tierHost = tierFlag(tierHost, "Host tier", true);
+        this.tierCluster = tierFlag(tierCluster, "Cluster tier", true);
+        this.tierDisk = tierFlag(tierDisk, "Disk tier", false);
+        this.tierVm = tierFlag(tierVm, "VM tier", false);
+        this.vmEveryN = intSetting(vmEveryN, DEFAULT_VM_EVERY_N, 1, MAX_VM_EVERY_N,
+                "VM tier every N cycles");
+        Set<EntityType.Tier> tiers = EnumSet.of(EntityType.Tier.CORE);
+        if (this.tierHost) tiers.add(EntityType.Tier.HOST);
+        if (this.tierCluster) tiers.add(EntityType.Tier.CLUSTER);
+        if (this.tierDisk) tiers.add(EntityType.Tier.DISK);
+        if (this.tierVm) tiers.add(EntityType.Tier.VM);
+        List<EntityType> scope = EntityType.ofTiers(tiers);
+        List<String> unknown = new ArrayList<>();
+        for (String id : ClusterFilter.items(excludeTypes)) {
+            EntityType t = EntityType.byId(id.toLowerCase(Locale.ROOT));
+            if (t == null) unknown.add(id);
+            else scope.remove(t);
+        }
+        if (scope.isEmpty()) {
+            throw new IllegalArgumentException("Entity types to exclude leaves no entity type "
+                    + "in scope with the tiers switched on; nothing would be collected");
+        }
+        this.types = Collections.unmodifiableList(scope);
+        this.unknownExcludes = Collections.unmodifiableList(unknown);
+    }
+
+    /**
+     * The configure WARN for exclude_types entries this build does not know
+     * (v2 "Settings": a WARN, not an error). Names are echoed only when they
+     * look like entity type ids, so pasted text is never logged.
+     */
+    String unknownExcludesWarning() {
+        StringBuilder names = new StringBuilder();
+        int other = 0;
+        for (String u : unknownExcludes) {
+            if (u.matches("[A-Za-z0-9-]{1,64}")) {
+                if (names.length() > 0) names.append(", ");
+                names.append(u);
+            } else {
+                other++;
+            }
+        }
+        return "Entity types to exclude: " + unknownExcludes.size() + " entr"
+                + (unknownExcludes.size() == 1 ? "y is" : "ies are")
+                + " not an entity type this build collects, ignored"
+                + (names.length() > 0 ? " (" + names + ")" : "")
+                + (other > 0 ? "; " + other + " not shown (not an entity type id)" : "");
+    }
+
+    /**
+     * A tier switch: empty (an account saved before the setting existed) is
+     * the default; otherwise {@code true} or {@code false}, any case.
+     */
+    static boolean tierFlag(String raw, String label, boolean dflt) {
+        String s = raw == null ? "" : raw.trim();
+        if (s.isEmpty()) return dflt;
+        if ("true".equalsIgnoreCase(s)) return true;
+        if ("false".equalsIgnoreCase(s)) return false;
+        throw new IllegalArgumentException(label + " must be true or false");
     }
 
     /** The strict on/off parse of perf_timing_logging: only {@code true}, any case. */
@@ -112,7 +208,9 @@ final class VsanPerfConfig {
         return "vcenter=" + vcenterHost + " " + filter() + " workers=" + workers
                 + " callTimeout=" + callTimeoutSeconds + "s cycleDeadline="
                 + (cycleDeadlineSeconds == 0 ? "interval-60s" : cycleDeadlineSeconds + "s")
-                + " perfTimingLogging=" + perfTimingLogging;
+                + " perfTimingLogging=" + perfTimingLogging + " tierHost=" + tierHost
+                + " tierCluster=" + tierCluster + " tierDisk=" + tierDisk + " tierVm=" + tierVm
+                + " vmEveryN=" + vmEveryN + " types=" + types.size();
     }
 
     static int intSetting(String raw, int dflt, int min, int max, String label) {

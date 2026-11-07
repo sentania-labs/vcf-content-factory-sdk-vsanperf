@@ -21,10 +21,13 @@ import java.util.Map;
 
 /**
  * VCF Content Factory vSAN Performance: vSAN Performance Service metrics
- * for DOM client, DOM owner and vSAN pNICs, read over the vSphere JSON API
- * and stitched onto the vCenter adapter's own VMWARE HostSystem objects
- * through the Suite API. The pak creates no object but its adapter
- * instance (design {@code knowledge/designs/vsanperf-mp-v1.md}).
+ * (the core DOM client, DOM owner and vSAN pNIC groups; the host and cluster
+ * tiers since build 10; the disk and VM tiers since build 11), read over the
+ * vSphere JSON API and stitched onto the vCenter adapter's own VMWARE
+ * HostSystem, ClusterComputeResource and VirtualMachine objects through the
+ * Suite API. The pak creates no object but its adapter
+ * instance and its collector object (designs
+ * {@code knowledge/designs/vsanperf-mp-v1.md} and {@code vsanperf-mp-v2.md}).
  *
  * <p><b>Where the cycle runs (build 7).</b> In {@code collect()} for the
  * one object the pak discovers per instance ({@link #COLLECTOR_KIND}), as
@@ -95,9 +98,13 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
             }
             CycleEngine engine = new CycleEngine(client, sas == null ? null : opsApi(sas),
                     new CycleEngine.Settings(cfg.filter(), cfg.workers,
-                            cfg.callTimeoutSeconds * 1000L, cfg.perfTimingLogging),
+                            cfg.callTimeoutSeconds * 1000L, cfg.perfTimingLogging, cfg.types,
+                            cfg.vmEveryN),
                     pakLog(), System::currentTimeMillis);
             engine.setStopSignal(this::isAbortRequested);
+            if (!cfg.unknownExcludes.isEmpty()) {
+                logWarn(cfg.unknownExcludesWarning());
+            }
             this.runtime = new Runtime(cfg, client, sas, engine);
             // Never the principal, password or token. // REDACT-SECRET
             logInfo("VsanPerfAdapter configured: " + cfg + " releaseId="
@@ -123,7 +130,11 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
                 getIdentifier(rc, "max_parallel_clusters"),
                 getIdentifier(rc, "call_timeout_seconds"),
                 getIdentifier(rc, "cycle_deadline_seconds"),
-                getIdentifier(rc, "perf_timing_logging"));
+                getIdentifier(rc, "perf_timing_logging"),
+                getIdentifier(rc, "tier_host"), getIdentifier(rc, "tier_cluster"),
+                getIdentifier(rc, "tier_disk"), getIdentifier(rc, "tier_vm"),
+                getIdentifier(rc, "vm_tier_every_n_cycles"),
+                getIdentifier(rc, "exclude_types"));
     }
 
     /** The JSON client on the platform trust store with the certificate name checked. */
@@ -186,8 +197,10 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
                     if (f.accepts(cl.moid, cl.name)) inScope++;
                 }
                 testSuiteApi();
+                if (!c.unknownExcludes.isEmpty()) logWarn(c.unknownExcludesWarning());
                 logInfo("Test OK: " + client.describeSession() + "; " + inv.clusters.size()
-                        + " cluster(s), " + vsan + " vSAN-enabled, " + inScope + " in scope");
+                        + " cluster(s), " + vsan + " vSAN-enabled, " + inScope + " in scope; "
+                        + c.types.size() + " entity type(s) per cluster");
             } finally {
                 client.close();
             }

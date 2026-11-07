@@ -2,16 +2,67 @@
 
 A Tier 2 (Java SDK) management pack for VCF Operations. It reads the vSAN
 Performance Service over the vSphere JSON API and puts the numbers on the
-hosts you already have: the vCenter adapter's own VMWARE HostSystem
-objects, as keys under `vSAN Perf`. Besides its adapter instance it creates
+hosts, clusters and VMs you already have: the vCenter adapter's own VMWARE
+HostSystem, ClusterComputeResource and VirtualMachine objects, as keys under
+`vSAN Perf`. Besides its adapter instance it creates
 one object, the "VCF Content Factory vSAN Performance Collector" its cycle
 runs for.
 
-Build 1 covers three entity types, 61 keys: DOM owner (38 per host), DOM
-client (6 per host) and vSAN physical NICs (17 per NIC, instanced as
-`vSAN Perf|pNIC:vmnic1|...`). On a 5-host cluster that is up to 390 series
-per cycle. Every key, unit and self-metric: [REFERENCE.md](REFERENCE.md).
-Design: the factory's `knowledge/designs/vsanperf-mp-v1.md`.
+Version 1.1.0 (build 11) covers 33 entity types, 451 keys, in five tiers:
+the always-on core (Build 1: DOM owner, DOM client, vSAN physical NICs, 61
+keys), the host tier (13 types, 149 keys on HostSystem) and the cluster tier
+(10 types, 189 keys on ClusterComputeResource), both on by default, and the
+disk tier (4 types, 31 keys on HostSystem per vSAN disk) and the VM tier (3
+types, 21 keys on VirtualMachine), both off by default. On a 5-host ESA
+cluster the default tiers are 1,186 series per cycle (390 core, 705 host
+tier, 91 cluster tier); the disk tier adds 50, the VM tier up to 2,400 per VM
+run (30 VMs). Every key, unit and self-metric: [REFERENCE.md](REFERENCE.md).
+Design: the factory's `knowledge/designs/vsanperf-mp-v1.md` and
+`vsanperf-mp-v2.md` with its P2 addendum.
+
+## Keys
+
+| Tier | Group (`vSAN Perf\|<group>\|...`) | Entity type | Lands on | Instance | Keys |
+|---|---|---|---|---|---|
+| core | `DOM Owner` | `host-domowner` | HostSystem | | 38 |
+| core | `DOM Client` | `host-domclient` | HostSystem | | 6 |
+| core | `pNIC:<vmnic>` | `vsan-pnic-net` | HostSystem | vSAN physical NIC | 17 |
+| host | `CMMDS Network` | `cmmds-net` | HostSystem | | 10 |
+| host | `CPU` | `vsan-cpu` | HostSystem | | 7 |
+| host | `vSAN Direct` | `vsan-direct-host` | HostSystem | | 8 |
+| host | `DOM Comp Mgr` | `host-domcompmgr` | HostSystem | | 16 |
+| host | `ESA Dedup DOM Client` | `host-esa-dedup-domclient-io` | HostSystem | | 24 |
+| host | `Host Network` | `vsan-host-net` | HostSystem | | 8 |
+| host | `ZDOM Top Stats` | `host-zdom-top-stats` | HostSystem | | 11 |
+| host | `Memory` | `vsan-memory` | HostSystem | | 12 |
+| host | `RDT Latency` | `rdt-network-latency` | HostSystem | | 11 |
+| host | `TCP/IP:<stack>` | `vsan-tcpip-stats` | HostSystem | TCP/IP stack | 12 |
+| host | `vNIC:<vmk>` | `vsan-vnic-net` | HostSystem | vSAN vmknic | 10 |
+| host | `vNIC RDT Latency:<vmk>` | `vnic-rdt-network-latency` | HostSystem | vSAN vmknic | 10 |
+| host | `ZDOM VTX` | `zdom-vtx` | HostSystem | | 10 |
+| cluster | `Capacity` | `vsan-cluster-capacity` | ClusterComputeResource | | 5 |
+| cluster | `DOM Client` | `cluster-domclient` | ClusterComputeResource | | 11 |
+| cluster | `DOM Comp Mgr` | `cluster-domcompmgr` | ClusterComputeResource | | 12 |
+| cluster | `DOM Owner` | `cluster-domowner` | ClusterComputeResource | | 23 |
+| cluster | `ESA Dedup DOM Client` | `cluster-esa-dedup-domclient-io` | ClusterComputeResource | | 24 |
+| cluster | `RDT Latency` | `cluster-rdt-network-latency` | ClusterComputeResource | | 9 |
+| cluster | `ZDOM Top Stats` | `cluster-zdom-top-stats` | ClusterComputeResource | | 7 |
+| cluster | `vSAN Direct Cluster` | `vsan-direct-cluster` | cluster or host, decided per entity | | 8 |
+| cluster | `File Service` | `vsan-file-service` | cluster or host, decided per entity | | 8 |
+| cluster | `IOInsight` | `ioinsight` | cluster or host, decided per entity | | 82 |
+| disk | `Cache Disk:<disk uuid>` | `cache-disk` | HostSystem (OSA) | vSAN disk | 8 |
+| disk | `Capacity Disk:<disk uuid>` | `capacity-disk` | HostSystem (OSA) | vSAN disk | 13 |
+| disk | `ESA Disk Layer:<disk uuid>` | `vsan-esa-disk-layer` | HostSystem | vSAN disk | 5 |
+| disk | `ESA Disk SCSI:<disk uuid>` | `vsan-esa-disk-scsifw` | HostSystem | vSAN disk | 5 |
+| vm | `VM` | `virtual-machine` | VirtualMachine | | 6 |
+| vm | `Virtual Disk:<busN:M>` | `virtual-disk` | VirtualMachine | bus position (`scsi0:0`) | 7 |
+| vm | `vSCSI:<scsiN:M>` | `vscsi` | VirtualMachine | virtual SCSI device | 8 |
+
+**Tier settings** (Advanced): `tier_host` and `tier_cluster` (default
+`true`), `tier_disk` and `tier_vm` (default `false`), `vm_tier_every_n_cycles`
+(default 3), and `exclude_types` (comma list of entity type ids). An account
+upgraded from 1.0.0.9 gets the host and cluster tiers on and the disk and VM
+tiers off; set host and cluster to `false` for Build 1 behaviour.
 
 ## How it collects
 
@@ -22,15 +73,37 @@ Design: the factory's `knowledge/designs/vsanperf-mp-v1.md`.
   of clusters and their hosts (paged when vCenter pages it). A cluster
   counts as vSAN when a member host has vSAN enabled and a vSAN cluster
   uuid.
-- Three Performance Service calls per vSAN cluster per cycle (one wildcard
-  query per entity type, the API's floor), 7-minute window, labels filter,
-  gzip. Clusters run through a bounded pool (**Parallel clusters**, default
-  4); each cluster's calls run in order, DOM owner first. Each cycle starts
-  after the last cluster the previous cycle attempted, so a cluster that
-  always runs past the deadline cannot starve the ones after it.
-- Values carry the sample's own 5-minute timestamp; a bucket already pushed
-  is not pushed again (tracked per entity and metric, and only once the
-  push came back clean).
+- One Performance Service call per entity type in scope per vSAN cluster
+  per cycle (one wildcard query per type, the API's floor), 7-minute
+  window, labels filter, gzip: 3 with the tiers off, 26 with the defaults
+  on the first cycles and 23 on the lab once its empty types are learned;
+  with all tiers 33 then 28 on the cluster's VM cycle (every 3rd), 30 then
+  25 on the others. Responses are parsed from the gzip stream one entity at
+  a time; VM-type calls run one at a time across the pool.
+  Clusters run through a bounded pool (**Parallel clusters**, default 4);
+  each cluster's calls run in order: core (DOM owner first), then the
+  cluster, host, disk and VM tiers. Each cycle starts after the last cluster
+  the previous cycle attempted, so a cluster that always runs past the
+  deadline cannot starve the ones after it.
+- A type that answers empty 3 cycles in a row on a cluster is not queried
+  there for about a day (core types and `ioinsight` never); see
+  REFERENCE.md "Learned types". A failing optional type is counted and
+  logged; only a core-type failure, or every call failing, fails a cluster.
+- Disk tier: a `QueryDisksForVsan` per host maps each vSAN disk to its host
+  (cached; re-read every 12th cycle, or after a miss at most once per 12
+  cycles; when every host fails, the retry waits for the same limit). VM
+  tier: a VM read scoped to the cluster (50 VMs per page, one read or VM
+  call in memory at a time; cached, re-read every 12th VM run of the
+  cluster, or after a miss at most once per 12 cycles) places VMs by
+  instance UUID and virtual disks by backing path at their bus position.
+- Values carry the sample's own 5-minute timestamp; every bucket in the
+  window newer than the last one pushed is pushed (since build 10), and a
+  bucket already pushed is not pushed again (tracked per entity and metric
+  in a compact in-memory table, and only once the push came back clean).
+- Clusters (cluster tier) and VMs (VM tier) are matched the same way, on
+  MoRef plus vCenter instance UUID; one with no VCF Operations object of
+  this vCenter is counted in `Collection|clusters_unresolved` /
+  `vms_unresolved`.
 - Hosts are matched on host MoRef plus vCenter instance UUID, never by
   name. A host with no HostSystem object of this vCenter in VCF Operations
   is counted in `Collection|hosts_unresolved` and its data is dropped. The
@@ -85,6 +158,20 @@ Install on VCF Operations 8.18, 9.0 and 9.1 (design T5) and check, on each:
    it renders).
 4. The collector's own log has no stack-trace storms or unexpected WARN
    lines over a few cycles.
+5. **Builds 10 and 11, cluster and VM tiers (design v2 T5, first step).**
+   The identifiers were read on devel in the design's P2 round
+   (`VMEntityObjectID` + `VMEntityVCID` on ClusterComputeResource and
+   VirtualMachine, both part of uniqueness); confirm on each platform that
+   this pak's pushes resolve (`clusters_unresolved` and `vms_unresolved` 0)
+   and read back one key per new group on a host, on the cluster and on one
+   VM. **Wait at least 6 minutes after the push before reading a cluster
+   key** (devel: ~343 s); VM keys read back after about a minute, host keys
+   after 1 to 4. Turn the disk and VM tiers on for the run, and note how
+   `TCP/IP:defaultTcpipStack`, `vNIC:vmk2`, `ESA Disk Layer:<uuid>`,
+   `Virtual Disk:scsi0:0` and `vSCSI:scsi0:0` render in the Metrics tab.
+6. **Build 10, in-place upgrade from 1.0.0.9:** the account and collector
+   object survive, the new settings show their defaults (both tiers on),
+   and the Build 1 keys continue without a gap.
 
 **Results so far (devel 9.0.2, build 5).** Check 1 passed: all 12 values
 read back on the instance; 390 series pushed, keys on all 5 hosts at the
@@ -140,12 +227,16 @@ adapter.yaml, describe.xml, resources/, icons/   pak metadata and descriptor
 src/com/vcfcf/adapters/vsanperf/
   VsanPerfAdapter.java    SDK glue: configure, Test Connection, the collector object
   CycleReport.java        one cycle: self-metrics and last_error first, then the failure
-  CycleEngine.java        the collector: inventory, pool, deadline, dedup, push
+  CycleEngine.java        the collector: inventory, pool, deadline, tiers, dedup, push
   VsanJsonClient.java     vSphere JSON API client (session, inventory, QueryPerf)
   Inventory.java          PropertyCollector result parser, cluster vSAN rule
-  PerfParser.java         QueryPerf response parser, newest-sample selection
-  EntityType.java         the 61-key catalog (design table)
-  OpsHostMap.java         HostSystem MoRef + vCenter UUID to Ops resource id
+  PerfParser.java         QueryPerf response parser (streamed), every-bucket selection
+  JsonStream.java         pull JSON reader for the streamed parse
+  VmInventory.java        VM read pages to compact rows, bus position
+  EntityType.java         the 399-key catalog (design tables), tiers, id forms
+  OpsHostMap.java         HostSystem / ClusterComputeResource MoRef + vCenter UUID to Ops id
+  Watermarks.java         compact per-(entity, metric) dedup marks
+  LearnedTypes.java       types skipped per cluster (faults, empty answers)
   ...                     config, faults, caps, dedup marks, learned types
 tests/                    plain-main tests (ci/run_java_tests.sh), verbatim
                           vendor fixtures with provenance, a SimpleJson stub

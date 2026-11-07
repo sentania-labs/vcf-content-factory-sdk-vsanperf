@@ -11,6 +11,7 @@ public final class InventoryTest {
         verbatim();
         rules();
         paging();
+        vsanSystem();
         System.out.println("InventoryTest: all assertions passed");
     }
 
@@ -37,6 +38,29 @@ public final class InventoryTest {
         for (Inventory.Host h : c.hosts) if (h.moid.equals("host-6017")) esx01 = h;
         T.eq("69805090-5bba-3949-88f7-38052534dfcc", esx01.nodeUuid, "esx01 node uuid");
         T.eq("vcf-lab-mgmt-esx01.int.sentania.net", esx01.name, "esx01 name");
+    }
+
+    /**
+     * Build 11, disk tier: the host pathSet gains configManager.vsanSystem
+     * only when asked; its MoRef value is kept. The ObjectContent below is
+     * constructed in the recorded shape (a MoRef val, as runtime.host in the
+     * P2 VM pages).
+     */
+    static void vsanSystem() throws Exception {
+        T.check(Inventory.retrieveBody("v", true).contains("\"configManager.vsanSystem\""), "asked");
+        T.check(!Inventory.retrieveBody("v", false).contains("configManager.vsanSystem"),
+                "not asked with the disk tier off");
+        String h = host("host-15151", true, "U", "n1");
+        h = h.substring(0, h.length() - 2) + ",{\"_typeName\":\"DynamicProperty\",\"name\":"
+                + "\"configManager.vsanSystem\",\"val\":{\"_typeName\":\"ManagedObjectReference\","
+                + "\"value\":\"vsanSystem-15151\",\"type\":\"HostVsanSystem\"}}]}";
+        Inventory.Builder b = new Inventory.Builder();
+        b.addPage(result(null, cluster("domain-c6004", "host-15151"), h));
+        T.eq("vsanSystem-15151", b.build().clusters.get(0).hosts.get(0).vsanSystem, "moId kept");
+        Inventory.Builder b2 = new Inventory.Builder();
+        b2.addPage(result(null, cluster("domain-c6004", "host-15151"), host("host-15151", true,
+                "U", "n1")));
+        T.eq(null, b2.build().clusters.get(0).hosts.get(0).vsanSystem, "absent: null");
     }
 
     static String host(String moid, Boolean enabled, String uuid, String node) {
