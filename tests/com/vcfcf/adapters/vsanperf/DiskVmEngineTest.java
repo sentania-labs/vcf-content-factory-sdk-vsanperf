@@ -44,6 +44,7 @@ public final class DiskVmEngineTest {
         vmReadEvery12thRun();
         vmReadsSerialize();
         diskTotalFailureRateLimited();
+        failedRefreshSuppressesVirtualDisk();
         System.out.println("DiskVmEngineTest: all assertions passed");
     }
 
@@ -281,6 +282,49 @@ public final class DiskVmEngineTest {
         T.eq(2, vc.vmReads.get(), "not again before the next 12 runs");
         e.run(in(60_000));
         T.eq(3, vc.vmReads.get(), "cycle 25: again");
+    }
+
+    /**
+     * Build 13 (Codex): a VM refresh that fails after an earlier successful
+     * device read must not let virtual-disk run on the stale device map. N = 1,
+     * VM tier only: cycle 1 reads; the 12th-run refresh at cycle 13 fails, so
+     * virtual-disk is not called that run while virtual-machine and vscsi are,
+     * still placed by the previous read; cycle 14 retries, succeeds, and
+     * virtual-disk resumes.
+     */
+    static void failedRefreshSuppressesVirtualDisk() throws Exception {
+        EngineTest.FakeVc vc = vc();
+        Object pages = vc.vmPages.get(LAB);
+        T.RecLog log = new T.RecLog();
+        CycleEngine e = engine(vc, ops(vc.inventory), log, EntityType.ofTiers(EnumSet.of(
+                EntityType.Tier.CORE, EntityType.Tier.VM)), 1, 1);
+        for (int cycle = 1; cycle <= 12; cycle++) e.run(in(60_000));
+        int reads = vc.vmReads.get();
+        int vdisk = vc.calls(LAB, EntityType.VIRTUAL_DISK);
+        int vm = vc.calls(LAB, EntityType.VIRTUAL_MACHINE);
+        int vscsi = vc.calls(LAB, EntityType.VSCSI);
+        T.eq(12, vdisk, "virtual-disk called on every run while the device map is current");
+
+        vc.vmPages.put(LAB, new IOException("RetrievePropertiesEx (VMs) returned HTTP 503"));
+        CycleEngine.Result r13 = e.run(in(60_000));
+        T.eq(null, r13.failure, "a failed VM read does not fail the cycle");
+        T.eq(reads + 1, vc.vmReads.get(), "cycle 13: the refresh was attempted");
+        T.eq(vdisk, vc.calls(LAB, EntityType.VIRTUAL_DISK), "no virtual-disk call on the stale map");
+        T.eq(vm + 1, vc.calls(LAB, EntityType.VIRTUAL_MACHINE), "virtual-machine still collected");
+        T.eq(vscsi + 1, vc.calls(LAB, EntityType.VSCSI), "vscsi still collected");
+        T.eq(0, r13.vmsUnresolved, "placed by the previous read");
+        T.check(r13.duplicatesSkipped > 0, "their rows reached the push stage (same buckets: dedup)");
+        T.check(r13.lastError.contains("VM read failed"), "last_error: " + r13.lastError);
+        T.eq(1, log.count("virtual-disk is not collected for it until a VM read succeeds"),
+                "WARN matches the behaviour");
+
+        vc.vmPages.put(LAB, pages);
+        CycleEngine.Result r14 = e.run(in(60_000));
+        T.eq(reads + 2, vc.vmReads.get(), "cycle 14: retried on the next VM run");
+        T.eq(vdisk + 1, vc.calls(LAB, EntityType.VIRTUAL_DISK), "virtual-disk resumes");
+        T.eq(null, r14.failure, "ok");
+        e.run(in(60_000));
+        T.eq(reads + 2, vc.vmReads.get(), "no further read once it succeeded");
     }
 
     /** Review W1 (build 11): two clusters' VM reads never overlap (one page in memory). */

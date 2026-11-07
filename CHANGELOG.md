@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.0.13 (Unreleased)
+
+- fix(adapter): build 13 (Codex on PR #8): a VM read that fails after an
+  earlier successful device read no longer lets `virtual-disk` run on the
+  stale device map (a moved disk could land on its old VM or bus position).
+  The failure is tracked per cluster: `virtual-disk` is not collected for
+  the cluster until a VM read succeeds, the read is retried on the cluster's
+  next VM run, and `virtual-machine` / `vscsi` keep using the previous read.
+  The WARN and REFERENCE.md say exactly that. New test
+  `DiskVmEngineTest.failedRefreshSuppressesVirtualDisk`.
+
 ## 1.1.0.12 (Unreleased)
 
 - fix(adapter): build 12, every finding of the build 11 review. B1: the VM

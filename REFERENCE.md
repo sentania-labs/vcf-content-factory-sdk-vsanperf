@@ -161,9 +161,12 @@ matched on MoRef plus vCenter instance UUID, never by name:
   VirtualMachine list (500 per page; `VMEntityInstanceUUID` is not used: it
   was empty on the powered-on vSAN VMs on devel), re-read every 12th cycle
   with a VM run, after a VM read changed a cluster's VM count, and after a
-  miss at most once per 12 cycles. If a VM read fails, `virtual-disk` is
-  skipped for that cluster that run, and `virtual-machine` / `vscsi` use the
-  previous read.
+  miss at most once per 12 cycles. If a due VM read fails (including a
+  refresh after an earlier successful read), `virtual-disk` is not collected
+  for that cluster until a VM read succeeds, since the previous device map
+  could place a moved disk on its old VM or bus position; the read is retried
+  on the cluster's next VM run, and `virtual-machine` / `vscsi` keep using
+  the previous read meanwhile (build 13).
 - **Runtime landing** for `vsan-direct-cluster`, `vsan-file-service` and
   `ioinsight`, whose id form has not been observed: an id equal to the
   cluster's vSAN uuid lands on the cluster; an id equal to one node uuid of

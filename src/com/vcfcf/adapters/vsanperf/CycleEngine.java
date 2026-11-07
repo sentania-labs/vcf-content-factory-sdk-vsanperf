@@ -255,6 +255,12 @@ final class CycleEngine {
         VmInventory vms;
         /** VM runs of this cluster since its last VM read attempt (review B1). */
         int vmRunsSinceRead;
+        /**
+         * Build 13: the last due VM read failed. virtual-disk stays off for the
+         * cluster until a read succeeds, and the read is retried on its next
+         * VM run (one call per cluster per VM run, bounded by the cadence).
+         */
+        boolean vmReadFailed;
         long vmMissReadCycle = Long.MIN_VALUE / 2;
         boolean vmMissPending;
         boolean vmReadWarned;
@@ -841,6 +847,8 @@ final class CycleEngine {
                     p.vmTrigger = "refresh";
                 } else if (p.vmDevices && !st.vms.withDevices) {
                     p.vmTrigger = "refresh";
+                } else if (st.vmReadFailed) {
+                    p.vmTrigger = "retry";
                 } else if (st.vmRunsSinceRead >= OPS_REFRESH_EVERY) {
                     // Review B1 (v2 device-list caching (b)): every 12th VM run, so
                     // a disk moved between VMs or bus positions, which no miss
@@ -1273,13 +1281,16 @@ final class CycleEngine {
             VmInventory before = st.vms;
             st.vms = m.vms;
             st.vmReadWarned = false;
+            st.vmReadFailed = false;
             if (before == null || before.vms() != m.vms.vms()) opsVmsChange = true;
         } else if (m.vmReadError != null) {
+            st.vmReadFailed = true;
             res.error("cluster " + m.cluster.moid + ": " + m.vmReadError);
             if (!st.vmReadWarned) {
                 st.vmReadWarned = true;
                 log.warn("cluster " + m.cluster.moid + ": " + m.vmReadError + "; virtual-disk "
-                        + "is not pushed for it this run" + (st.vms == null ? ""
+                        + "is not collected for it until a VM read succeeds (retried on its "
+                        + "next VM run)" + (st.vms == null ? ""
                                 : "; virtual-machine and vscsi use the previous VM read"));
             }
         }
@@ -1402,6 +1413,9 @@ final class CycleEngine {
         boolean diskReadDone = plan.diskTrigger == null;
         VmInventory vms = plan.vms;
         boolean vmReadDone = plan.vmTrigger == null;
+        // Build 13 (Codex): a VM read that was due and failed leaves the device
+        // map unproven for this run, so virtual-disk is not collected on it.
+        boolean vmReadFailed = false;
         try {
             for (EntityType type : settings.types) {
                 if (Thread.currentThread().isInterrupted()) {
@@ -1428,10 +1442,18 @@ final class CycleEngine {
                 if (type.target == EntityType.Target.VM && !vmReadDone) {
                     vmReadDone = true;
                     VmInventory fresh = readVmInventory(id, c, plan, deadlineMs, queue, vmWaitMax);
-                    if (fresh != null) vms = fresh;
+                    if (fresh != null) {
+                        vms = fresh;
+                    } else {
+                        vmReadFailed = true;
+                    }
                 }
-                if (type == EntityType.VIRTUAL_DISK && (vms == null || !vms.withDevices)) {
-                    // v2 failure table: virtual-disk needs the device map; dropped this run.
+                if (type == EntityType.VIRTUAL_DISK
+                        && (vmReadFailed || vms == null || !vms.withDevices)) {
+                    // v2 failure table: virtual-disk needs a current device map. When
+                    // the due read failed, the previous map may place a moved disk on
+                    // its old VM or bus position, so the type is dropped this run;
+                    // virtual-machine and vscsi still use the previous read.
                     continue;
                 }
                 long left = deadlineMs - clock.getAsLong();

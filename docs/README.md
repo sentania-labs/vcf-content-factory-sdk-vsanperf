@@ -19,6 +19,6 @@
 ## Quick Reference
 
 - **Adapter kind:** `vcfcf_vsanperf`
-- **Version:** 0.0.0.12
+- **Version:** 0.0.0.13
 - **Traversal spec:** (none)
 - **Resource kinds:** 1
