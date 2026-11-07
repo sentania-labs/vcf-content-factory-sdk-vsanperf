@@ -33,7 +33,9 @@ import java.util.List;
  * with its own timestamp; the engine pushes those newer than the
  * per-(entity, label) mark. An all-{@code None} series yields no sample
  * (never a zero). Per-mille labels are converted here. A label not in the
- * catalog is dropped (the labels filter means none arrive).
+ * catalog of the instance's scope is dropped and counted (under
+ * {@code metric_scope=dashboard} the labels filter means none arrive; under
+ * {@code all} the {@code Actual} twins and anything the catalog lacks, v3 C3).
  */
 final class PerfParser {
 
@@ -80,9 +82,25 @@ final class PerfParser {
         final int seriesKept;
         /** Samples (non-None buckets) kept over all series. */
         final int samples;
+        /** Series dropped for a label outside the scope's catalog (v3 {@code labels_dropped}). */
+        final int labelsDropped;
+        /**
+         * The distinct dropped label names (at most {@link #DROPPED_NAMES_MAX},
+         * sorted), for the once-a-day INFO; names only, never an entity id.
+         */
+        final List<String> droppedNames;
 
         Result(List<Entity> entities, int echoes, int malformed, int malformedParts,
                 int seriesSeen, int seriesKept, int samples) {
+            this(entities, echoes, malformed, malformedParts, seriesSeen, seriesKept, samples, 0,
+                    Collections.emptyList());
+        }
+
+        Result(List<Entity> entities, int echoes, int malformed, int malformedParts,
+                int seriesSeen, int seriesKept, int samples, int labelsDropped,
+                List<String> droppedNames) {
+            this.labelsDropped = labelsDropped;
+            this.droppedNames = Collections.unmodifiableList(droppedNames);
             this.samples = samples;
             this.entities = Collections.unmodifiableList(entities);
             this.echoes = echoes;
@@ -110,6 +128,11 @@ final class PerfParser {
      *         unreadable response, never an empty success
      */
     static Result parse(String body, EntityType type) throws IOException {
+        return parse(body, type, EntityType.Scope.DASHBOARD);
+    }
+
+    /** {@link #parse(String, EntityType)} keeping the catalog rows of {@code scope}. */
+    static Result parse(String body, EntityType type, EntityType.Scope scope) throws IOException {
         SimpleJson root;
         try {
             root = SimpleJson.parse(body);
@@ -120,7 +143,7 @@ final class PerfParser {
             throw new Unreadable(type.id + ": the response is not a JSON array "
                     + "of entities; treated as unreadable");
         }
-        Acc acc = new Acc(type);
+        Acc acc = new Acc(type, scope);
         for (SimpleJson e : root.asList()) {
             List<String[]> series = new ArrayList<>();
             for (SimpleJson x : e.get("value").asList()) {
@@ -145,7 +168,13 @@ final class PerfParser {
      *         is passed on wrapped as {@link Unreadable}
      */
     static Result parse(InputStream decoded, EntityType type) throws IOException {
-        Acc acc = new Acc(type);
+        return parse(decoded, type, EntityType.Scope.DASHBOARD);
+    }
+
+    /** {@link #parse(InputStream, EntityType)} keeping the catalog rows of {@code scope}. */
+    static Result parse(InputStream decoded, EntityType type, EntityType.Scope scope)
+            throws IOException {
+        Acc acc = new Acc(type, scope);
         Reader r = new BufferedReader(new InputStreamReader(decoded, StandardCharsets.UTF_8),
                 16 * 1024);
         try {
@@ -168,9 +197,15 @@ final class PerfParser {
         return acc.result();
     }
 
+    /** Most dropped label names kept per response (the rest are counted only). */
+    static final int DROPPED_NAMES_MAX = 64;
+
     /** Accumulates entities of one response into compact samples (both parses). */
     private static final class Acc {
         private final EntityType type;
+        private final EntityType.Scope scope;
+        private int dropped;
+        private final java.util.TreeSet<String> droppedNames = new java.util.TreeSet<>();
         private final List<Entity> out = new ArrayList<>();
         private int echoes;
         private int malformed;
@@ -179,8 +214,9 @@ final class PerfParser {
         private int kept;
         private int samplesKept;
 
-        Acc(EntityType type) {
+        Acc(EntityType type, EntityType.Scope scope) {
             this.type = type;
+            this.scope = scope;
         }
 
         /** One entity: its id, {@code sampleInfo}, and (label, values CSV) per series. */
@@ -198,8 +234,14 @@ final class PerfParser {
             List<Sample> samples = new ArrayList<>();
             for (String[] s : series) {
                 seen++;
-                EntityType.Metric metric = s[0] == null ? null : type.metric(s[0]);
-                if (metric == null) continue;
+                EntityType.Metric metric = s[0] == null ? null : type.metric(s[0], scope);
+                if (metric == null) {
+                    dropped++;
+                    if (s[0] != null && droppedNames.size() < DROPPED_NAMES_MAX) {
+                        droppedNames.add(s[0]);
+                    }
+                    continue;
+                }
                 List<Sample> b = buckets(metric, times, s[1]);
                 if (!b.isEmpty()) {
                     samples.addAll(b);
@@ -211,7 +253,8 @@ final class PerfParser {
         }
 
         Result result() {
-            return new Result(out, echoes, malformed, malformedParts, seen, kept, samplesKept);
+            return new Result(out, echoes, malformed, malformedParts, seen, kept, samplesKept,
+                    dropped, new ArrayList<>(droppedNames));
         }
     }
 

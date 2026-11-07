@@ -47,7 +47,16 @@ import java.util.function.LongSupplier;
  * Standalone: {@code ci/replay.sh [--clusters 70] [--hosts 6] [--cycles 6]
  * [--workers 4] [--latency-ms 190] [--ceiling 7] [--model vcenter|cluster]
  * [--tiers default|all|core] [--vm] [--disk] [--vm-every 3] [--vms-per-host 40]
- * [--heap] [--pace 20] [--perf] [--push-fixed-ms 60] [--push-ms-per-resource 1.5]}. Design T4 ({@code ReplayBudgetTest}) drives it from the tests.
+ * [--heap] [--pace 20] [--perf] [--push-fixed-ms 60] [--push-ms-per-resource 1.5]
+ * [--scope dashboard|all]}. Design T4 ({@code ReplayBudgetTest}) drives it from the tests.
+ *
+ * <p><b>{@code --scope all}</b> (build 19, design v3 T3/T4 rows (d), (d'),
+ * (e)): every type's template is its P3 capture
+ * ({@code all-<type>-2026-11-07.json}, no labels filter, 69 types); a type
+ * whose capture is a fault answers that fault (after a 40 ms call), an
+ * empty one the wildcard echo, as on the lab. Series with a {@code None}
+ * newest token push nothing for that bucket, so the expected count is taken
+ * from the captures' tokens, not from the catalog size.
  */
 final class ReplayHarness {
 
@@ -100,11 +109,13 @@ final class ReplayHarness {
          */
         double pushFixedMs = 60.0;
         double pushMsPerResource = 1.5;
+        /** Build 19: the metric scope (design v3). */
+        EntityType.Scope scope = EntityType.Scope.DASHBOARD;
 
         List<EntityType> types() {
             return new VsanPerfConfig("vc", "u", "p", "", "", null, null, null, null,
                     String.valueOf(tierHost), String.valueOf(tierCluster), String.valueOf(tierDisk),
-                    String.valueOf(tierVm), String.valueOf(vmEveryN), "").types;
+                    String.valueOf(tierVm), String.valueOf(vmEveryN), "", scope.label).types;
         }
 
         @Override
@@ -114,7 +125,7 @@ final class ReplayHarness {
                     + (perVcenter ? "per vCenter" : "per cluster") + ", tiers core"
                     + (tierHost ? "+host" : "") + (tierCluster ? "+cluster" : "")
                     + (tierDisk ? "+disk" : "") + (tierVm ? "+vm(N=" + vmEveryN + ", "
-                            + vmsPerHost + " VMs/host)" : "");
+                            + vmsPerHost + " VMs/host)" : "") + ", scope " + scope.label;
         }
     }
 
@@ -350,12 +361,18 @@ final class ReplayHarness {
     private static final class Row {
         final String suffix;
         final String seriesJson;
+        /** Series of the scope's catalog whose newest token is a number (build 19). */
+        final int newestValues;
 
-        Row(String suffix, String seriesJson) {
+        Row(String suffix, String seriesJson, int newestValues) {
             this.suffix = suffix;
             this.seriesJson = seriesJson;
+            this.newestValues = newestValues;
         }
     }
+
+    /** Build 19, scope all: the types whose P3 capture is a fault, with that fault's body. */
+    private final Map<EntityType, String> faults = new LinkedHashMap<>();
 
     /** Per type: rows by lab node index (host types) or the one row (cluster, VM types). */
     private final Map<EntityType, List<List<Row>>> templates = new LinkedHashMap<>();
@@ -391,6 +408,19 @@ final class ReplayHarness {
                 {"virtual-machine", "queryperf-virtual-machine-2026-11-06.json"},
                 {"virtual-disk", "queryperf-virtual-disk-2026-11-06.json"},
                 {"vscsi", "queryperf-vscsi-2026-11-06.json"}};
+        if (cfg.scope == EntityType.Scope.ALL) {
+            List<String[]> all = new ArrayList<>();
+            for (EntityType t : EntityType.values()) {
+                String file = "all-" + t.id + "-2026-11-07.json";
+                String body = T.vendor(file);
+                if (body.trim().startsWith("{")) {
+                    faults.put(t, body);
+                } else {
+                    all.add(new String[] {t.id, file});
+                }
+            }
+            files = all.toArray(new String[0][]);
+        }
         for (String[] f : files) {
             EntityType t = EntityType.byId(f[0]);
             List<Object> entities = JsonStream.list(new JsonStream(new java.io.StringReader(
@@ -398,12 +428,21 @@ final class ReplayHarness {
             Map<String, List<Row>> byFirst = new TreeMap<>();
             for (Object e : entities) {
                 String ref = JsonStream.str(JsonStream.get(e, "entityRefId"));
+                if (ref.endsWith(":*")) continue; // an empty type's echo
                 String id = ref.substring(ref.indexOf(':') + 1);
                 int bar = id.indexOf('|');
                 String first = bar < 0 ? id : id.substring(0, bar);
                 String suffix = bar < 0 ? "" : id.substring(bar);
+                int newestValues = 0;
+                for (Object x : JsonStream.list(JsonStream.get(e, "value"))) {
+                    String label = JsonStream.str(JsonStream.get(JsonStream.get(x, "metricId"), "label"));
+                    String vals = JsonStream.str(JsonStream.get(x, "values"));
+                    if (label == null || vals == null || t.metric(label, cfg.scope) == null) continue;
+                    String[] tok = vals.split(",", -1);
+                    if (PerfParser.number(tok[tok.length - 1]) != null) newestValues++;
+                }
                 byFirst.computeIfAbsent(first, k -> new ArrayList<>()).add(new Row(suffix,
-                        JsonWrite.write(JsonStream.get(e, "value"))));
+                        JsonWrite.write(JsonStream.get(e, "value")), newestValues));
             }
             templates.put(t, new ArrayList<>(byFirst.values()));
         }
@@ -641,10 +680,21 @@ final class ReplayHarness {
 
         @Override public CycleEngine.PerfCall queryPerf(String cluster, EntityType type, long s,
                 long e, long timeoutMs) throws IOException {
+            return queryPerf(cluster, type, EntityType.Scope.DASHBOARD, s, e, timeoutMs);
+        }
+
+        @Override public CycleEngine.PerfCall queryPerf(String cluster, EntityType type,
+                EntityType.Scope scope, long s, long e, long timeoutMs) throws IOException {
             calls.incrementAndGet();
+            String fault = faults.get(type);
+            if (fault != null) {
+                // P3: a fault answers in ~40 ms (36 to 61 ms on the lab).
+                serve(cluster, 40);
+                throw VsanFault.parse(fault, 500);
+            }
             serve(cluster, latency(type));
             ChunkStream in = new ChunkStream(chunks(type, index.get(cluster), newest));
-            PerfParser.Result r = PerfParser.parse(in, type);
+            PerfParser.Result r = PerfParser.parse(in, type, scope);
             // Wire bytes: the lab's gzip ratio is about 1:10 to 1:17.
             return new CycleEngine.PerfCall(r, 200, in.count / 12, in.count);
         }
@@ -788,7 +838,7 @@ final class ReplayHarness {
         clock.queueCapacity = Math.max(8, 4 * cfg.workers);
         long baseline = cfg.heap ? usedAfterGc() : 0;
         CycleEngine e = new CycleEngine(vc, ops, new CycleEngine.Settings(new ClusterFilter("", ""),
-                cfg.workers, 30_000, log != null, cfg.types(), cfg.vmEveryN),
+                cfg.workers, 30_000, log != null, cfg.types(), cfg.vmEveryN, cfg.scope),
                 log == null ? Log.NONE : log, clock);
         List<CycleResult> out = new ArrayList<>();
         for (int i = 1; i <= cfg.cycles; i++) {
@@ -834,6 +884,9 @@ final class ReplayHarness {
 
     /** Expected values for a completed cycle's newest bucket (one per series). */
     long expectedSeriesPerCycle() {
+        if (cfg.scope == EntityType.Scope.ALL) {
+            return (long) cfg.clusters * (expectedPerCluster() + expectedPerHosts());
+        }
         long perHost = 0;
         long perCluster = 0;
         for (EntityType t : cfg.types()) {
@@ -847,6 +900,37 @@ final class ReplayHarness {
             }
         }
         return (long) cfg.clusters * (perCluster + (long) cfg.hosts * perHost);
+    }
+
+    /** Scope all: newest-bucket values on one synthetic cluster's ClusterComputeResource. */
+    long expectedPerCluster() {
+        long n = 0;
+        for (EntityType t : cfg.types()) {
+            List<List<Row>> rows = templates.get(t);
+            if (t.tier == EntityType.Tier.CLUSTER && rows != null && !rows.isEmpty()) {
+                n += rows.get(0).get(0).newestValues;
+            }
+        }
+        return n;
+    }
+
+    /** Scope all: newest-bucket values on one synthetic cluster's hosts (host, core and disk types). */
+    long expectedPerHosts() {
+        long n = 0;
+        for (EntityType t : cfg.types()) {
+            List<List<Row>> rows = templates.get(t);
+            if (rows == null || rows.isEmpty()) continue;
+            if (t.tier == EntityType.Tier.CLUSTER || t.tier == EntityType.Tier.VM) continue;
+            for (int h = 0; h < cfg.hosts; h++) {
+                List<Row> hr = rows.get(h % rows.size());
+                if (t.tier == EntityType.Tier.DISK) {
+                    n += hr.get(0).newestValues;
+                } else {
+                    for (Row r : hr) n += r.newestValues;
+                }
+            }
+        }
+        return n;
     }
 
     // ------------------------------------------------------------------
@@ -938,6 +1022,10 @@ final class ReplayHarness {
                 case "--pace": c.pace = Integer.parseInt(args[++i]); break;
                 case "--push-ms-per-resource": c.pushMsPerResource = Double.parseDouble(args[++i]); break;
                 case "--push-fixed-ms": c.pushFixedMs = Double.parseDouble(args[++i]); break;
+                case "--scope":
+                    c.scope = EntityType.Scope.parse(args[++i]);
+                    if (c.scope == null) throw new IllegalArgumentException("--scope dashboard|all");
+                    break;
                 default: throw new IllegalArgumentException("unknown argument " + a);
             }
         }

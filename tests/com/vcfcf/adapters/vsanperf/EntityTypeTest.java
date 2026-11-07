@@ -60,6 +60,7 @@ public final class EntityTypeTest {
         T.near(12.5, EntityType.VSAN_PNIC_NET.metric("rxErr").convert(125), "per mille to percent");
         T.near(125, EntityType.VSAN_PNIC_NET.metric("rxCrcErrRaw").convert(125), "raw unchanged");
         build2();
+        build3();
         System.out.println("EntityTypeTest: all assertions passed");
     }
 
@@ -74,7 +75,7 @@ public final class EntityTypeTest {
         java.util.Map<EntityType.Tier, Integer> types = new java.util.EnumMap<>(EntityType.Tier.class);
         for (EntityType t : EntityType.values()) {
             keys.merge(t.tier, t.size(), Integer::sum);
-            types.merge(t.tier, 1, Integer::sum);
+            if (t.inScope(EntityType.Scope.DASHBOARD)) types.merge(t.tier, 1, Integer::sum);
         }
         T.eq(189, keys.get(EntityType.Tier.CLUSTER), "cluster tier keys");
         T.eq(10, types.get(EntityType.Tier.CLUSTER), "cluster tier types");
@@ -84,7 +85,9 @@ public final class EntityTypeTest {
         T.eq(4, types.get(EntityType.Tier.DISK), "disk tier types");
         T.eq(21, keys.get(EntityType.Tier.VM), "VM tier keys");
         T.eq(3, types.get(EntityType.Tier.VM), "VM tier types");
-        T.eq(33, EntityType.values().length, "33 types");
+        int dashTypes = 0;
+        for (EntityType t : EntityType.values()) if (t.inScope(EntityType.Scope.DASHBOARD)) dashTypes++;
+        T.eq(33, dashTypes, "33 dashboard-scope types");
         int all = 0;
         for (EntityType t : EntityType.values()) all += t.size();
         T.eq(451, all, "451 keys (the Python pack's default scope)");
@@ -125,6 +128,7 @@ public final class EntityTypeTest {
         }
         // Targets and id forms.
         for (EntityType t : EntityType.values()) {
+            if (t.allOnly) continue; // build 3 types: build3()
             if (t.tier == EntityType.Tier.CLUSTER) {
                 boolean landing = t == EntityType.VSAN_DIRECT_CLUSTER
                         || t == EntityType.VSAN_FILE_SERVICE || t == EntityType.IOINSIGHT;
@@ -172,8 +176,258 @@ public final class EntityTypeTest {
         }
         for (EntityType t : EntityType.values()) {
             if (t.target != EntityType.Target.CLUSTER_OR_HOST) continue;
-            T.check(!byGroup.containsKey("host|" + t.group), t.group + " landing on a host collides");
+            // Build 3: cluster-pmem shares PMem with host-pmem; it never lands on a host.
+            T.check(!byGroup.containsKey("host|" + t.group) || !t.landsOnHost(),
+                    t.group + " landing on a host collides");
+            T.eq(!byGroup.containsKey("host|" + t.group), t.landsOnHost(), t.id + " lands on host");
         }
+        T.check(!EntityType.CLUSTER_PMEM.landsOnHost(), "cluster-pmem: cluster only");
+        T.check(EntityType.CLUSTER_RESYNC.landsOnHost(), "cluster-resync: runtime landing");
+    }
+
+    /** v3 Units rule 1: disputed units, label verbatim. */
+    static final java.util.Set<String> DISPUTED = java.util.Set.of("cluster-pmem latencyRead",
+            "cluster-pmem latencyWrite", "host-pmem latencyRead", "host-pmem latencyWrite",
+            "ddh-disk avgReadLatency", "ddh-disk avgWriteLatency",
+            "disk-group outstandingBytesSched", "system-mem pctMemUsed");
+
+    static final String[] FAMILY_18 = {"cluster-esa-dedup-domclient-io",
+            "host-esa-dedup-domclient-io", "cluster-esa-dedup-domcompmgr-io",
+            "host-esa-dedup-domcompmgr-io"};
+
+    /**
+     * Build 19 (design v3): the 1,144 Appendix A rows plus the 210 P3 labels
+     * (v3 addendum Q3), both copied verbatim into
+     * tests/fixtures/design-build3-metrics.md: each is an all-scope row of its
+     * type with the listed leaf, the stat key, the per-mille transform on
+     * exactly the 15 listed keys; the catalog holds nothing else; v3 rules
+     * 1 to 7 reproduce every Appendix A leaf from the Python pack's units
+     * (tests/fixtures/design-build3-units.tsv); one leaf per label across
+     * types; counts, forms, targets, flags and order of the 36 new types.
+     */
+    static void build3() throws Exception {
+        String doc = T.read("design-build3-metrics.md");
+        Pattern row = Pattern.compile("^- \\*\\*`([A-Za-z0-9-]+)`\\*\\* \\(`([^`]+)`, (\\w+), "
+                + "(\\w+), \\+(\\d+)[^)]*\\): (.*)$");
+        java.util.Map<String, java.util.Map<String, String>> appendix = new java.util.LinkedHashMap<>();
+        java.util.Map<String, String> setOf = new java.util.HashMap<>();
+        int rows = 0;
+        String extrasDoc = doc.substring(doc.indexOf("### Labels beyond the Python model"));
+        for (String line : doc.substring(0, doc.indexOf("### Labels beyond")).split("\n")) {
+            Matcher m = row.matcher(line);
+            if (!m.find()) continue;
+            java.util.Map<String, String> leaves = new java.util.LinkedHashMap<>();
+            for (String it : m.group(6).split(", ")) {
+                String[] lf = it.split("\u2192");
+                leaves.put(lf[0], lf.length == 2 ? lf[1] : lf[0]);
+            }
+            T.eq(Integer.parseInt(m.group(5)), leaves.size(), m.group(1) + " row count");
+            appendix.put(m.group(1), leaves);
+            setOf.put(m.group(1), m.group(4));
+            rows += leaves.size();
+        }
+        T.eq(1144, rows, "Appendix A: 1,144 keys");
+        T.eq(57, appendix.size(), "21 shared + 36 new types");
+
+        // The P3 labels (210): the four 18-label types, the two domowner types
+        // (the same 18 plus 40), chunk service 6, hash service 5.
+        java.util.Map<String, List<String>> extras = new java.util.LinkedHashMap<>();
+        for (String line : extrasDoc.split("\n")) {
+            if (!line.startsWith("- **")) continue;
+            int sep = line.indexOf(":**");
+            List<String> types = ticks(line.substring(0, sep));
+            List<String> names = ticks(line.substring(sep));
+            for (String t : types) extras.computeIfAbsent(t, k -> new ArrayList<>()).addAll(names);
+        }
+        List<String> eighteen = extras.get(FAMILY_18[0]);
+        T.eq(18, eighteen.size(), "the 18-label family");
+        for (String t : new String[] {"cluster-esa-dedup-domowner-io", "host-esa-dedup-domowner-io"}) {
+            T.eq(40, extras.get(t).size(), t + " 40 own");
+            extras.get(t).addAll(0, eighteen);
+        }
+        int extraCount = 0;
+        for (List<String> v : extras.values()) extraCount += v.size();
+        T.eq(210, extraCount, "P3: 210 labels beyond the Python model");
+
+        java.util.Set<String> perMille = new java.util.HashSet<>(java.util.Arrays.asList(
+                "vsan-pnic-net rxPacketsLossRate", "vsan-pnic-net txPacketsLossRate",
+                "vsan-tcpip-stats ip6Errs", "vsan-tcpip-stats ipErrs", "vsan-vnic-net ip6Errs",
+                "vsan-vnic-net ipErrs", "vsan-vnic-net tcpErrs", "vsan-vnic-net tcpHalfopenDropRate",
+                "vsan-vnic-net tcpRcvdupackRate", "vsan-vnic-net tcpRcvduppackRate",
+                "vsan-vnic-net tcpRcvoopackRate", "vsan-vnic-net tcpSackRcvBlocksRate",
+                "vsan-vnic-net tcpSackRexmitsRate", "vsan-vnic-net tcpSackSendBlocksRate",
+                "vsan-vnic-net tcpTimeoutDropRate"));
+        java.util.Map<String, String[]> units = new java.util.HashMap<>();
+        for (String line : T.read("design-build3-units.tsv").split("\n")) {
+            if (line.startsWith("#") || line.trim().isEmpty()) continue;
+            String[] p = line.split("\t");
+            units.put(p[0], p);
+        }
+        // The released (dashboard) leaf of every label, for rule 2.
+        java.util.Map<String, EntityType.Metric> released = new java.util.HashMap<>();
+        for (EntityType t : EntityType.values()) {
+            for (EntityType.Metric m : t.metrics()) {
+                EntityType.Metric prev = released.put(m.label, m);
+                T.check(prev == null || prev.leaf.equals(m.leaf), "released leaf conflict " + m.label);
+            }
+        }
+        int pm = 0;
+        java.util.Map<String, String> leafOfLabel = new java.util.HashMap<>();
+        for (java.util.Map.Entry<String, java.util.Map<String, String>> e : appendix.entrySet()) {
+            EntityType t = EntityType.byId(e.getKey());
+            T.check(t != null, "type " + e.getKey());
+            T.eq("new".equals(setOf.get(e.getKey())), t.allOnly, t.id + " all-only flag");
+            for (java.util.Map.Entry<String, String> r : e.getValue().entrySet()) {
+                EntityType.Metric m = t.metric(r.getKey(), EntityType.Scope.ALL);
+                T.check(m != null, t.id + " has " + r.getKey());
+                T.check(!m.dashboard, t.id + " " + r.getKey() + " is all-scope");
+                T.eq(null, t.metric(r.getKey()), t.id + " " + r.getKey() + " not under dashboard");
+                T.eq(r.getValue(), m.leaf, t.id + " " + r.getKey() + " leaf");
+                boolean wantPm = perMille.contains(t.id + " " + r.getKey());
+                T.eq(wantPm, m.perMille, t.id + " " + r.getKey() + " per-mille");
+                if (wantPm) pm++;
+                T.eq(r.getValue(), v3Leaf(t.id, r.getKey(), units.get(r.getKey()), released),
+                        t.id + " " + r.getKey() + " follows v3 rules 1 to 7");
+            }
+        }
+        T.eq(15, pm, "per-mille on exactly 15 new keys");
+        for (java.util.Map.Entry<String, List<String>> e : extras.entrySet()) {
+            EntityType t = EntityType.byId(e.getKey());
+            for (String l : e.getValue()) {
+                EntityType.Metric m = t.metric(l, EntityType.Scope.ALL);
+                T.check(m != null && !m.dashboard && !m.perMille, t.id + " P3 label " + l);
+                T.check(!released.containsKey(l), l + " is not a released label");
+                T.eq(l, m.leaf, t.id + " " + l + ": unit unknown, no suffix (rule 4)");
+            }
+        }
+        // Nothing else: every all-scope row is in Appendix A or the P3 list.
+        int all = 0;
+        java.util.Map<EntityType.Tier, Integer> perTier = new java.util.EnumMap<>(EntityType.Tier.class);
+        java.util.Map<EntityType.Tier, Integer> typesPerTier = new java.util.EnumMap<>(EntityType.Tier.class);
+        for (EntityType t : EntityType.values()) {
+            all += t.size(EntityType.Scope.ALL);
+            perTier.merge(t.tier, t.size(EntityType.Scope.ALL), Integer::sum);
+            typesPerTier.merge(t.tier, 1, Integer::sum);
+            int pos = 0;
+            for (EntityType.Metric m : t.metrics(EntityType.Scope.ALL)) {
+                T.eq(pos++, m.position, t.id + " positions: dashboard rows first");
+                // One leaf per label, except the 8 disputed rows of rule 1, which
+                // stay verbatim even where the label is released with a suffix.
+                if (!DISPUTED.contains(t.id + " " + m.label)) {
+                    String prev = leafOfLabel.put(m.label, m.leaf);
+                    T.check(prev == null || prev.equals(m.leaf), "one leaf per label: " + m.label);
+                }
+                if (m.dashboard) continue;
+                java.util.Map<String, String> a = appendix.get(t.id);
+                boolean inA = a != null && a.containsKey(m.label);
+                boolean inP3 = extras.containsKey(t.id) && extras.get(t.id).contains(m.label);
+                T.check(inA ^ inP3, t.id + " " + m.label + " in exactly one source");
+            }
+            T.eq(t.size(), t.metrics().size(), t.id + " dashboard size");
+        }
+        T.eq(1805, all, "1,805 keys under all: 451 + 1,144 + 210 (P3)");
+        T.eq(69, EntityType.values().length, "69 types");
+        T.eq(407, perTier.get(EntityType.Tier.CORE), "core keys under all");
+        T.eq(390 + 105, perTier.get(EntityType.Tier.CLUSTER), "cluster: 390 + 105 P3");
+        T.eq(634 + 105, perTier.get(EntityType.Tier.HOST), "host: 634 + 105 P3");
+        T.eq(126, perTier.get(EntityType.Tier.DISK), "disk keys under all");
+        T.eq(38, perTier.get(EntityType.Tier.VM), "VM keys under all");
+        T.eq(List.of(3, 34, 19, 7, 6), List.of(typesPerTier.get(EntityType.Tier.CORE),
+                typesPerTier.get(EntityType.Tier.HOST), typesPerTier.get(EntityType.Tier.CLUSTER),
+                typesPerTier.get(EntityType.Tier.DISK), typesPerTier.get(EntityType.Tier.VM)),
+                "types per tier");
+        T.eq(null, EntityType.HOST_DOMOWNER.requestLabels(EntityType.Scope.ALL), "no filter under all");
+        T.eq(EntityType.HOST_DOMOWNER.labels(),
+                EntityType.HOST_DOMOWNER.requestLabels(EntityType.Scope.DASHBOARD), "dashboard filter");
+
+        // The 36 new types: forms, targets, flags (v3 "New types", Q5, Q6).
+        Object[][] forms = {
+                {EntityType.HOST_CPU, EntityType.IdForm.ONE_OR_TWO, EntityType.Target.HOST},
+                {EntityType.DOM_WORLD_CPU, EntityType.IdForm.WORLD, EntityType.Target.HOST},
+                {EntityType.LSOM_WORLD_CPU, EntityType.IdForm.WORLD, EntityType.Target.HOST},
+                {EntityType.HEAP_MEMORY, EntityType.IdForm.TWO, EntityType.Target.HOST},
+                {EntityType.SLAB_MEMORY, EntityType.IdForm.TWO, EntityType.Target.HOST},
+                {EntityType.VSAN_ISCSI_TARGET, EntityType.IdForm.TWO, EntityType.Target.HOST},
+                {EntityType.VSAN_ISCSI_LUN, EntityType.IdForm.LUN, EntityType.Target.HOST},
+                {EntityType.DISK_GROUP, EntityType.IdForm.SELF, EntityType.Target.DISK},
+                {EntityType.CLOM_DISK, EntityType.IdForm.SELF, EntityType.Target.DISK},
+                {EntityType.DDH_DISK, EntityType.IdForm.SELF, EntityType.Target.DISK},
+                {EntityType.REMOTE_VIRTUAL_MACHINE, EntityType.IdForm.ONE, EntityType.Target.VM},
+                {EntityType.REMOTE_VIRTUAL_DISK, EntityType.IdForm.REMOTE_PATH, EntityType.Target.VM},
+                {EntityType.REMOTE_VSCSI, EntityType.IdForm.TWO, EntityType.Target.VM},
+                {EntityType.CLUSTER_RESYNC, EntityType.IdForm.ONE, EntityType.Target.CLUSTER_OR_HOST},
+                {EntityType.CLUSTER_PMEM, EntityType.IdForm.ONE, EntityType.Target.CLUSTER_OR_HOST},
+                {EntityType.VSAN_DP_HISTORICAL_STATS, EntityType.IdForm.ONE, EntityType.Target.CLUSTER},
+                {EntityType.CLUSTER_REMOTEDOMCLIENT, EntityType.IdForm.ONE, EntityType.Target.CLUSTER}};
+        for (Object[] f : forms) {
+            EntityType t = (EntityType) f[0];
+            T.eq(f[1], t.form, t.id + " form");
+            T.eq(f[2], t.target, t.id + " target");
+        }
+        java.util.Set<EntityType> strikes = java.util.EnumSet.of(EntityType.CLOM_DISK,
+                EntityType.CLOM_HOST, EntityType.CMMDS_WORKLOAD, EntityType.DDH_DISK,
+                EntityType.HEAP_MEMORY, EntityType.SLAB_MEMORY, EntityType.REMOTE_VIRTUAL_DISK,
+                EntityType.REMOTE_VIRTUAL_MACHINE, EntityType.REMOTE_VSCSI);
+        java.util.Set<EntityType> remote = java.util.EnumSet.of(EntityType.CLUSTER_REMOTEDOMCLIENT,
+                EntityType.COMPUTECLUSTER_REMOTEDOMCLIENT, EntityType.HOST_REMOTEDOMCLIENT,
+                EntityType.COMPUTEHOST_REMOTEDOMCLIENT, EntityType.REMOTE_VIRTUAL_MACHINE,
+                EntityType.REMOTE_VIRTUAL_DISK, EntityType.REMOTE_VSCSI);
+        for (EntityType t : EntityType.values()) {
+            T.eq(strikes.contains(t), t.faultStrikes, t.id + " Q5 strikes");
+            T.eq(remote.contains(t), t.remote, t.id + " remote");
+        }
+        T.eq("vSAN Perf|pCPU|pcpuUsedPct", EntityType.HOST_CPU.statKey(null,
+                EntityType.HOST_CPU.metric("pcpuUsedPct", EntityType.Scope.ALL)), "pCPU aggregate");
+        T.eq("vSAN Perf|pCPU:cpu-0|pcpuUsedPct", EntityType.HOST_CPU.statKey("cpu-0",
+                EntityType.HOST_CPU.metric("pcpuUsedPct", EntityType.Scope.ALL)), "pCPU per CPU");
+        T.eq("vSAN Perf|System Memory|pctMemUsed", EntityType.SYSTEM_MEM.statKey(null,
+                EntityType.SYSTEM_MEM.metric("pctMemUsed", EntityType.Scope.ALL)),
+                "Q4: pctMemUsed verbatim, integer percent as served");
+        T.check(!EntityType.SYSTEM_MEM.metric("pctMemUsed", EntityType.Scope.ALL).perMille,
+                "Q4: no per-mille transform");
+    }
+
+    /** The names in backticks of one markdown line. */
+    static List<String> ticks(String s) {
+        List<String> out = new ArrayList<>();
+        Matcher m = Pattern.compile("`([A-Za-z0-9-]+)`").matcher(s);
+        while (m.find()) out.add(m.group(1));
+        return out;
+    }
+
+    /** v3 "Units: leaf rule for new labels", rules 1 to 7, first match wins. */
+    static String v3Leaf(String type, String label, String[] unit,
+            java.util.Map<String, EntityType.Metric> released) {
+        if (DISPUTED.contains(type + " " + label)) return label;                  // 1
+        if (released.containsKey(label)) return released.get(label).leaf;         // 2
+        if ("true".equals(unit[2])) return label + "Pct";                         // 3
+        if (label.equals("totalMbMemUsed")) return label;                         // 7
+        String u = unit[1];
+        if (u.equals("none")) return label;                                       // 4
+        if (u.equals("MISC.IO_OPERATIONS_PER_SECOND")) return label;              // 5
+        switch (u) {                                                              // 6
+            case "TIME.MICROSECONDS":
+                return anyWord(label, "Us", "USec", "Sec", "Bps") ? label : label + "Us";
+            case "DATA_RATE.BIBYTE_PER_SECOND":
+                return anyWord(label, "Us", "USec", "Sec", "Bps") ? label : label + "BytesPerSec";
+            case "DATA_SIZE.BYTE": return anyWord(label, "Bytes") ? label : label + "Bytes";
+            case "TIME.MILLISECONDS": return anyWord(label, "Ms") ? label : label + "Ms";
+            case "TIME.SECONDS": return anyWord(label, "Sec") ? label : label + "Sec";
+            case "TIME.NANOSECONDS": return anyWord(label, "Ns") ? label : label + "Ns";
+            case "RATIO.PERCENT": return anyWord(label, "Pct", "Percent") ? label : label + "Pct";
+            default: throw new AssertionError("unit " + u + " of " + label);
+        }
+    }
+
+    /** {@code label} contains a token as a camelCase word (not followed by a lower-case letter). */
+    static boolean anyWord(String label, String... tokens) {
+        for (String tok : tokens) {
+            for (int i = label.indexOf(tok); i >= 0; i = label.indexOf(tok, i + 1)) {
+                int j = i + tok.length();
+                if (j == label.length() || !Character.isLowerCase(label.charAt(j))) return true;
+            }
+        }
+        return false;
     }
 
     /** The design's leaf rule: v1 Q1, extended by v2 Q6 (Bytes, Ms, Pct). */

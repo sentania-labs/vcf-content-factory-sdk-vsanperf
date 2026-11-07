@@ -81,7 +81,27 @@ public final class EngineTest {
 
         @Override public CycleEngine.PerfCall queryPerf(String cluster, EntityType type, long s,
                 long e, long timeoutMs) throws IOException, InterruptedException {
+            return answer(cluster, type, EntityType.Scope.DASHBOARD);
+        }
+
+        /** Build 19: the scope the engine asked under, per call (dashboard goes through the 5-arg form). */
+        final Map<String, EntityType.Scope> scopes = new ConcurrentHashMap<>();
+
+        @Override public CycleEngine.PerfCall queryPerf(String cluster, EntityType type,
+                EntityType.Scope scope, long s, long e, long timeoutMs)
+                throws IOException, InterruptedException {
+            scopes.put(cluster + "|" + type.id, scope);
+            if (scope == EntityType.Scope.DASHBOARD) return queryPerf(cluster, type, s, e, timeoutMs);
+            return answer(cluster, type, scope);
+        }
+
+        /** Build 20: every call in the order made ("cluster|type"). */
+        final List<String> order = Collections.synchronizedList(new ArrayList<>());
+
+        CycleEngine.PerfCall answer(String cluster, EntityType type, EntityType.Scope scope)
+                throws IOException, InterruptedException {
             String k = cluster + "|" + type.id;
+            order.add(k);
             calls.computeIfAbsent(k, x -> new AtomicInteger()).incrementAndGet();
             Long d = delays.get(k);
             if (d != null) Thread.sleep(d);
@@ -92,8 +112,8 @@ public final class EngineTest {
             if (NULL_RESULT.equals(a)) return new CycleEngine.PerfCall(null, 200, 0, 0);
             String body = a == null ? "[{\"_typeName\":\"VsanPerfEntityMetricCSV\",\"entityRefId\":\""
                     + type.id + ":*\",\"sampleInfo\":\"\"}]" : (String) a;
-            return new CycleEngine.PerfCall(PerfParser.parse(body, type), 200, body.length(),
-                    body.length());
+            return new CycleEngine.PerfCall(PerfParser.parse(body, type, scope), 200,
+                    body.length(), body.length());
         }
 
         int calls(String cluster, EntityType t) {
@@ -227,6 +247,7 @@ public final class EngineTest {
         capsWithinTimeGroup();
         failedMiddleBatchOnly();
         noStarvationBehindSlowCluster();
+        cutClusterRestartsFirst();
         loginFailsCollectThrows();
         summaryAndPerfLinesEveryCycle();
         System.out.println("EngineTest: all assertions passed");
@@ -596,6 +617,83 @@ public final class EngineTest {
         e.run(in(400));
         T.eq(2, vc.calls("domain-c2", EntityType.HOST_DOMOWNER), "c2 queried again in cycle 3");
         T.eq(3, vc.calls("domain-c1", EntityType.HOST_DOMOWNER), "c1 still gets its turn");
+    }
+
+    static FakeVc fiveClusters() {
+        FakeVc vc = new FakeVc();
+        List<Inventory.Cluster> cls = new ArrayList<>();
+        for (String n : new String[] {"1", "2", "3", "4", "5"}) {
+            cls.add(new Inventory.Cluster("domain-c" + n, "c" + n, List.of(new Inventory.Host(
+                    "host-" + n, n, "node-" + n, "U" + n, true))));
+        }
+        vc.inventory = new Inventory(cls);
+        return vc;
+    }
+
+    /** The clusters, in order, whose DOM owner call came first in each cycle's calls from {@code from}. */
+    static List<String> firstTwo(FakeVc vc, int from) {
+        List<String> out = new ArrayList<>();
+        synchronized (vc.order) {
+            for (String k : vc.order.subList(from, vc.order.size())) {
+                if (k.endsWith("|host-domowner")) out.add(k.substring(0, k.indexOf('|')));
+                if (out.size() == 2) break;
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Builds 19 and 20 (design v3 T4 (d), build 19 review W1): with two
+     * workers, a cluster the deadline cut after it was started late (not one
+     * the workers started with) is first next cycle; a cluster that timed out
+     * on its own call before the deadline is not a cut and does not move the
+     * start; with one worker the rotation alone moves on (the restarted
+     * cluster would hold the only worker).
+     */
+    static void cutClusterRestartsFirst() throws Exception {
+        // Two workers, c3 cut by the deadline.
+        FakeVc vc = fiveClusters();
+        vc.delays.put("domain-c3|host-domowner", 3_000L);
+        FakeOps ops = labOps(vc.inventory);
+        CycleEngine e = engine(vc, ops, 2, 30_000, new T.RecLog(), "");
+        CycleEngine.Result r1 = e.run(in(600));
+        T.eq(1, r1.clustersTimedOut, "c3 cut");
+        T.eq(4, r1.clustersOk, "the others done");
+        int mark = vc.order.size();
+        e.run(in(600));
+        T.eq(List.of("domain-c3", "domain-c4"), sorted(firstTwo(vc, mark)),
+                "two workers: cycle 2 starts with the cut c3 (and c4 beside it)");
+        // (A cluster cut at the front, or cut two cycles running, is never
+        // restarted first: noStarvationBehindSlowCluster.)
+
+        // Two workers, c3 times out on its own call before the deadline: not a cut.
+        vc = fiveClusters();
+        vc.answers.put("domain-c3|host-domowner",
+                new HttpTimeoutException("synthetic per-call timeout"));
+        e = engine(vc, labOps(vc.inventory), 2, 30_000, new T.RecLog(), "");
+        CycleEngine.Result t1 = e.run(in(5_000));
+        T.eq(1, t1.clustersTimedOut, "c3 timed out on its call");
+        mark = vc.order.size();
+        e.run(in(5_000));
+        T.eq(List.of("domain-c1", "domain-c2"), sorted(firstTwo(vc, mark)),
+                "a per-call timeout does not move the start (rotation wraps to c1, c2)");
+
+        // One worker, c2 cut by the deadline: no restart-first.
+        vc = fiveClusters();
+        vc.delays.put("domain-c2|host-domowner", 3_000L);
+        e = engine(vc, labOps(vc.inventory), 1, 30_000, new T.RecLog(), "");
+        e.run(in(600));
+        T.eq(1, vc.calls("domain-c2", EntityType.HOST_DOMOWNER), "c2 started late, cut");
+        mark = vc.order.size();
+        e.run(in(600));
+        T.eq("domain-c3", firstTwo(vc, mark).get(0),
+                "one worker: cycle 2 continues after c2, not with it");
+    }
+
+    static List<String> sorted(List<String> l) {
+        List<String> s = new ArrayList<>(l);
+        Collections.sort(s);
+        return s;
     }
 
     /**

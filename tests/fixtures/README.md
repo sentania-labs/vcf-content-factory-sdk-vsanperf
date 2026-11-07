@@ -35,6 +35,12 @@ vSAN ESA cluster `domain-c6004`, 5 hosts), 2026-11-06. Provenance:
   `ClusterComputeResource` and `VirtualMachine` resource lists): that
   folder's `PROVENANCE-2026-11-06-p2.md` (requests, maxObjects, tokens,
   sizes). The Ops bodies are as received (not gzipped).
+- the 69 P3 files `all-<type>-2026-11-07.json` (build 19, design v3 P3):
+  that folder's `all-<type>.json`, renamed with the capture date, byte for
+  byte; provenance `PROVENANCE-2026-11-07-all.md` (vCenter 9.1.1.0100 build
+  25784172, cluster `domain-c6004`, window 2026-11-07 13:47:50Z to 13:54:50Z,
+  **no `labels` key**, release id `8.0.3.0`). Faults (11, HTTP 500 bodies) and
+  empty echoes (17) are saved like any other body. Factory commit `478d67b`.
 - Digest: the factory's `knowledge/context/api-maps/vsan-performance-service.md`,
   sections "JSON API transport", "vim25 inventory over JSON" and "Build 2
   entity types (measured 2026-11-06)".
@@ -90,6 +96,75 @@ them: a test that needs another shape builds it in code and says so.
 | `retrievepropertiesex-fault-device-subpath-2026-11-06.json` | `3e2aeb519e068b65` |
 | `ops-devel-resources-clustercomputeresource-2026-11-06.json` | `534dd99b1a0fd26d` |
 | `ops-devel-resources-virtualmachine-2026-11-06.json` | `839ba9d4989576a8` |
+| `all-cache-disk-2026-11-07.json` | `fc6c2cfeb24290c8` |
+| `all-capacity-disk-2026-11-07.json` | `6d70f1f5fd2b9ac5` |
+| `all-clom-disk-2026-11-07.json` | `92b031b5e93fbe96` |
+| `all-clom-host-2026-11-07.json` | `92b031b5e93fbe96` |
+| `all-cluster-domclient-2026-11-07.json` | `e11f411c4ccc2896` |
+| `all-cluster-domcompmgr-2026-11-07.json` | `037b355d2df42b97` |
+| `all-cluster-domowner-2026-11-07.json` | `b0876d75603ce827` |
+| `all-cluster-esa-dedup-domclient-io-2026-11-07.json` | `2a19ee033e1d7a13` |
+| `all-cluster-esa-dedup-domcompmgr-io-2026-11-07.json` | `2fbadcc4d41d3110` |
+| `all-cluster-esa-dedup-domowner-io-2026-11-07.json` | `392d36fc9f31d3fc` |
+| `all-cluster-esa-dedup-store-chunksvc-2026-11-07.json` | `f3ffe3f6746cc115` |
+| `all-cluster-esa-dedup-store-hashsvc-2026-11-07.json` | `d1ac4dd538d0b7c8` |
+| `all-cluster-pmem-2026-11-07.json` | `3a4abb4356419f0e` |
+| `all-cluster-rdt-network-latency-2026-11-07.json` | `5e3f8be7c64f0710` |
+| `all-cluster-remotedomclient-2026-11-07.json` | `9e666414d1980ab9` |
+| `all-cluster-resync-2026-11-07.json` | `3502ea257eb6fea4` |
+| `all-cluster-zdom-top-stats-2026-11-07.json` | `0e1498641051d141` |
+| `all-cmmds-net-2026-11-07.json` | `6f04f9ca8d720eb4` |
+| `all-cmmds-workload-2026-11-07.json` | `92b031b5e93fbe96` |
+| `all-computeCluster-remotedomclient-2026-11-07.json` | `6cf2a8bfaba32afd` |
+| `all-computeHost-remotedomclient-2026-11-07.json` | `69e830551eae7160` |
+| `all-ddh-disk-2026-11-07.json` | `92b031b5e93fbe96` |
+| `all-disk-group-2026-11-07.json` | `e2eca6ef279ce76c` |
+| `all-dom-world-cpu-2026-11-07.json` | `5dd13bfb454dc30d` |
+| `all-heap-memory-2026-11-07.json` | `92b031b5e93fbe96` |
+| `all-host-cpu-2026-11-07.json` | `11ea82f16cd9f557` |
+| `all-host-domclient-2026-11-07.json` | `61ade3b8ec51d13c` |
+| `all-host-domcompmgr-2026-11-07.json` | `b7c98e6fe354946a` |
+| `all-host-domowner-2026-11-07.json` | `5010926aef39c972` |
+| `all-host-esa-dedup-domclient-io-2026-11-07.json` | `e3ddb26242644fc3` |
+| `all-host-esa-dedup-domcompmgr-io-2026-11-07.json` | `4595d7b39e9106a7` |
+| `all-host-esa-dedup-domowner-io-2026-11-07.json` | `6efa272fcbf0ae17` |
+| `all-host-esa-dedup-store-chunksvc-2026-11-07.json` | `b6129865bf7d540d` |
+| `all-host-esa-dedup-store-hashsvc-2026-11-07.json` | `1ef95a4a674f5d12` |
+| `all-host-pmem-2026-11-07.json` | `3a4abb4356419f0e` |
+| `all-host-remotedomclient-2026-11-07.json` | `55e96e2a250596ed` |
+| `all-host-vsansparse-2026-11-07.json` | `3e7c59053733d366` |
+| `all-host-zdom-top-stats-2026-11-07.json` | `45c1bd06622dc318` |
+| `all-ioinsight-2026-11-07.json` | `925db70ac522a860` |
+| `all-lsom-world-cpu-2026-11-07.json` | `9bde3c0e9604586f` |
+| `all-rdt-net-2026-11-07.json` | `c4ce98d4adef59e7` |
+| `all-rdt-network-latency-2026-11-07.json` | `5b002fa375afd962` |
+| `all-remote-virtual-disk-2026-11-07.json` | `92b031b5e93fbe96` |
+| `all-remote-virtual-machine-2026-11-07.json` | `92b031b5e93fbe96` |
+| `all-remote-vscsi-2026-11-07.json` | `92b031b5e93fbe96` |
+| `all-slab-memory-2026-11-07.json` | `92b031b5e93fbe96` |
+| `all-system-mem-2026-11-07.json` | `24bf01126ff4f68a` |
+| `all-virtual-disk-2026-11-07.json` | `f7dc316c1493f138` |
+| `all-virtual-machine-2026-11-07.json` | `1839bddf1c1a9768` |
+| `all-vnic-rdt-network-latency-2026-11-07.json` | `ea086f9ae6127bfe` |
+| `all-vsan-cluster-capacity-2026-11-07.json` | `f3bff93c40fd3240` |
+| `all-vsan-cpu-2026-11-07.json` | `c432586d98f02627` |
+| `all-vsan-direct-cluster-2026-11-07.json` | `3d77b410e7b5ca7c` |
+| `all-vsan-direct-host-2026-11-07.json` | `f35907a1b03fa685` |
+| `all-vsan-distribution-2026-11-07.json` | `f31d5d86f4351d4c` |
+| `all-vsan-dp-historical-stats-2026-11-07.json` | `49e75c1e4ea6e5fa` |
+| `all-vsan-esa-disk-layer-2026-11-07.json` | `fe3105844b904a1d` |
+| `all-vsan-esa-disk-scsifw-2026-11-07.json` | `f2b3d72dbc192a4a` |
+| `all-vsan-file-service-2026-11-07.json` | `4a79869e4d88275b` |
+| `all-vsan-host-net-2026-11-07.json` | `5525c39312419a69` |
+| `all-vsan-iscsi-host-2026-11-07.json` | `cf4078997f7e3582` |
+| `all-vsan-iscsi-lun-2026-11-07.json` | `2080a1b5f014c58d` |
+| `all-vsan-iscsi-target-2026-11-07.json` | `624e4c7ce3bd4aca` |
+| `all-vsan-memory-2026-11-07.json` | `15c379a1dad03377` |
+| `all-vsan-pnic-net-2026-11-07.json` | `ae1c726ebd15aa02` |
+| `all-vsan-tcpip-stats-2026-11-07.json` | `ac21e78e138d6658` |
+| `all-vsan-vnic-net-2026-11-07.json` | `a8b87a76cbf7b64d` |
+| `all-vscsi-2026-11-07.json` | `1d46557f3be662be` |
+| `all-zdom-vtx-2026-11-07.json` | `db6e8abcd0ed6f60` |
 
 ## `design-build1-metrics.md`: the design's metric table
 
@@ -121,3 +196,23 @@ five hosts' `QueryDisksForVsan` answers (`DiskVmEngineTest`, from the api
 map's P2 uuid-to-host table; only host-15151's body was saved), and a
 device array with NVMe, SATA, IDE and unknown controllers (`DiskVmTest`,
 **synthesized**: the lab has PVSCSI and LSI Logic disks only).
+
+## `design-build3-metrics.md`: the v3 catalog delta (build 19)
+
+A copy of "Appendix A: catalog delta (1,144 keys)" of the factory's
+`knowledge/designs/vsanperf-mp-v3.md` and of the "Labels beyond the Python
+model (210, ESA dedup types only)" list in the P3 section of
+`knowledge/context/api-maps/vsan-performance-service.md` (both factory commit
+`478d67b`, 2026-11-07; the design's decisions addendum puts the 210 in
+scope, Q3). `EntityTypeTest` checks every `metric_scope=all` row of
+`EntityType` against it: nothing more, nothing less.
+
+## `design-build3-units.tsv`: the Python pack units the v3 leaf rule reads
+
+For each of the 762 distinct labels of Appendix A: the Python pack's unit
+(`app/metric_labels.py` `UNITS`, `none` when it has no entry) and whether it
+is in `app/perfsvc.py` `PERMILLE`, from the fork
+`content/sdk-adapters/vsanhostmetrics` at tag `v2.0.0-rc.2`, generated
+2026-11-07. `EntityTypeTest` applies the design's rules 1 to 7 to it and
+must reproduce every Appendix A leaf.
+

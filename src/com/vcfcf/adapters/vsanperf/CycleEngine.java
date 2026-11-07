@@ -83,6 +83,17 @@ final class CycleEngine {
 
         PerfCall queryPerf(String clusterMoid, EntityType type, long startMs, long endMs,
                 long timeoutMs) throws IOException, InterruptedException;
+
+        /**
+         * Build 19: the query under a metric scope ({@code all}: no labels
+         * filter, the response parsed against the whole catalog). The default
+         * is the dashboard query, for fakes that model only that.
+         */
+        default PerfCall queryPerf(String clusterMoid, EntityType type, EntityType.Scope scope,
+                long startMs, long endMs, long timeoutMs)
+                throws IOException, InterruptedException {
+            return queryPerf(clusterMoid, type, startMs, endMs, timeoutMs);
+        }
     }
 
     /** The VCF Operations side (the framework {@code SuiteApiStitcher}). */
@@ -130,6 +141,12 @@ final class CycleEngine {
         final List<EntityType> types;
         /** VM tier cadence: a cluster runs its VM types every Nth cycle, staggered. */
         final int vmEveryN;
+        /**
+         * Build 19 (v3): the metric scope. Fixed for the engine's life: a
+         * scope change is a reconfigure, which builds a new engine, so learned
+         * types and dedup marks restart (v3 "Setting" step 5).
+         */
+        final EntityType.Scope scope;
 
         /** Build 1 behaviour: the three core types only (all tiers off). */
         Settings(ClusterFilter filter, int workers, long callTimeoutMs, boolean perfLogging) {
@@ -145,6 +162,19 @@ final class CycleEngine {
 
         Settings(ClusterFilter filter, int workers, long callTimeoutMs, boolean perfLogging,
                 List<EntityType> types, int vmEveryN) {
+            this(filter, workers, callTimeoutMs, perfLogging, types, vmEveryN,
+                    EntityType.Scope.DASHBOARD);
+        }
+
+        Settings(ClusterFilter filter, int workers, long callTimeoutMs, boolean perfLogging,
+                List<EntityType> types, int vmEveryN, EntityType.Scope scope) {
+            this.scope = scope == null ? EntityType.Scope.DASHBOARD : scope;
+            List<EntityType> inScope = new ArrayList<>();
+            for (EntityType t : types) {
+                // An all-only type has no dashboard labels: never queried under dashboard.
+                if (t.inScope(this.scope)) inScope.add(t);
+            }
+            types = inScope;
             this.filter = filter;
             this.workers = workers;
             this.callTimeoutMs = callTimeoutMs;
@@ -153,9 +183,10 @@ final class CycleEngine {
             this.vmEveryN = Math.max(1, vmEveryN);
         }
 
-        /** VM-tier types in scope that need the device list ({@code virtual-disk}). */
+        /** VM-tier types in scope that need the device list ({@code virtual-disk}, {@code remote-virtual-disk}). */
         boolean needsDevices() {
-            return types.contains(EntityType.VIRTUAL_DISK);
+            for (EntityType t : types) if (t.form.isPath()) return true;
+            return false;
         }
 
         boolean has(EntityType.Tier tier) {
@@ -239,6 +270,10 @@ final class CycleEngine {
     private final Map<EntityType, Long> landingWarnedAt = new java.util.concurrent.ConcurrentHashMap<>();
     /** Review N5: per type, when its malformed-id WARN was last written. */
     private final Map<EntityType, Long> malformedWarnedAt = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Build 19: per type, when its dropped-labels INFO was last written (once a day). */
+    private final Map<EntityType, Long> droppedInfoAt = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Build 19: remote (HCI Mesh) refs warned since the last host map refresh. */
+    private final Set<String> remoteWarned = new HashSet<>();
     /** Review W1: (cluster, type) optional failures warned since the last host map refresh. */
     private final Set<String> optionalWarned = new HashSet<>();
 
@@ -287,11 +322,34 @@ final class CycleEngine {
     private final Set<String> exemptFaultLogged = java.util.concurrent.ConcurrentHashMap.newKeySet();
     /**
      * Fairness: the furthest cluster, in last cycle's order, that a worker
-     * started, whatever its outcome (Codex review: advancing only on success
+     * started before the deadline (build 19), whatever its outcome (Codex review: advancing only on success
      * let a cluster that always runs past the deadline be first every cycle
      * and starve the ones after it).
      */
     private String lastAttempted;
+    /**
+     * Build 19 (design v3 T4 (d)): the next cycle starts at this cluster, the
+     * earliest one this cycle started before the deadline and the deadline
+     * cut unfinished (build 20: not a cluster that timed out on its own call
+     * before the deadline; never with {@code max_parallel_clusters=1}),
+     * so the clusters a cut interrupts are first next cycle instead of
+     * waiting for the rotation to come round. Never one of the clusters the
+     * workers started with (they had the whole cycle), nor one the previous
+     * cycle cut too: the Codex starvation case, a cluster that cannot finish
+     * must not hold the front and starve the ones after it, so a chronic one
+     * rotates as before. {@code null}: rotate after {@link #lastAttempted}.
+     */
+    private String restartAt;
+    /** Clusters cut unfinished (started before the deadline) in the previous cycle. */
+    private Set<String> cutLastCycle = Collections.emptySet();
+    /**
+     * Clusters this cycle did not lose to the deadline (caller thread): OK,
+     * FAILED, or TIMED_OUT on their own call timeout before the deadline
+     * (build 20, review W1: a per-call timeout is not a cut).
+     */
+    private final Set<String> cycleSettled = new HashSet<>();
+    /** This cycle's deadline, for {@link #cycleSettled}. */
+    private long cycleDeadlineMs;
     private final Set<String> skipInfoLogged = new HashSet<>();
     private final Set<String> uuidWarned = new HashSet<>();
 
@@ -364,6 +422,8 @@ final class CycleEngine {
         final int[] tierUnresolved = new int[TIERS];
         final int[] tierLearnedSkips = new int[TIERS];
         final int[] tierFailed = new int[TIERS];
+        /** Build 19: series dropped for a label outside the scope's catalog. */
+        final int[] tierLabelsDropped = new int[TIERS];
 
         /** Self-metric values by key (describe.xml {@code Collection} group). */
         Map<String, Double> metrics() {
@@ -461,6 +521,14 @@ final class CycleEngine {
         long decodedBytes;
         int entities;
         int seriesKept;
+        /** Build 19: series dropped for their label, and the names (PerfParser). */
+        int labelsDropped;
+        List<String> droppedNames = Collections.emptyList();
+        /**
+         * Build 19 (v3 Q6): refs of a remote (HCI Mesh) type that are not an
+         * object of the queried cluster; counted in clusters_unresolved.
+         */
+        final Set<String> remoteUnresolved = new HashSet<>();
 
         TypeDone(Inventory.Cluster c, EntityType type, List<EntityRows> rows,
                 Set<String> unresolvedNodes, Set<String> missedMoids) {
@@ -485,6 +553,8 @@ final class CycleEngine {
         final List<OptionalFailure> optional;
         final boolean vmRun;
         final long wallMs;
+        /** Clock time the cluster's task ended (build 20: a cut is a TIMED_OUT end at or after the deadline). */
+        long endedAt;
         final String warn;
         final String fatal;
         /** A VirtualMachineError or thread kill in the worker: rethrown on the caller thread. */
@@ -596,6 +666,7 @@ final class CycleEngine {
                     unresolvedNodeWarned.clear();
                     optionalWarned.clear();
                     unresolvedDiskWarned.clear();
+                    remoteWarned.clear();
                     log.info("Ops host map: " + m);
                     perf("PERF inventory cycle=" + id + " read=ops_resources ms="
                             + (clock.getAsLong() - to) + " count=" + m.size());
@@ -648,7 +719,8 @@ final class CycleEngine {
                         + res.tierEntities[i] + " series_kept=" + res.tierSeriesKept[i]
                         + " series_pushed=" + res.tierSeriesPushed[i] + " unresolved="
                         + res.tierUnresolved[i] + " learned_skips=" + res.tierLearnedSkips[i]
-                        + " failed=" + res.tierFailed[i]);
+                        + " failed=" + res.tierFailed[i] + " scope=" + settings.scope.label
+                        + " labels_dropped=" + res.tierLabelsDropped[i]);
             }
             return res;
         } catch (RuntimeException e) {
@@ -677,7 +749,8 @@ final class CycleEngine {
                     + "; unparsed=" + res.entitiesUnparsed + "; learned skips=" + res.learnedSkips
                     + "; optional calls failed=" + res.optionalCallsFailed
                     + "; push batches ok="
-                    + res.pushBatchesOk + " failed=" + res.pushBatchesFailed + "; "
+                    + res.pushBatchesOk + " failed=" + res.pushBatchesFailed + "; scope="
+                    + settings.scope.label + "; "
                     + String.format(java.util.Locale.ROOT, "%.1f", res.cycleSeconds) + " s"
                     + (res.failure != null ? "; FAILED: " + res.failure : ""));
             perf("PERF cycle cycle=" + id + " clusters=" + res.clustersInScope + " perf_calls="
@@ -889,7 +962,10 @@ final class CycleEngine {
             sorted.put(c.moid, c);
         }
         List<Inventory.Cluster> order = new ArrayList<>(sorted.values());
-        if (lastAttempted != null && order.size() > 1) {
+        if (restartAt != null && sorted.containsKey(restartAt) && order.size() > 1) {
+            int i = new ArrayList<>(sorted.keySet()).indexOf(restartAt);
+            Collections.rotate(order, -i);
+        } else if (lastAttempted != null && order.size() > 1) {
             String start = sorted.higherKey(lastAttempted);
             if (start != null) {
                 int i = new ArrayList<>(sorted.keySet()).indexOf(start);
@@ -934,6 +1010,9 @@ final class CycleEngine {
         Map<String, Future<?>> futures = new LinkedHashMap<>();
         long submitAt = clock.getAsLong();
         AtomicInteger furthestStarted = new AtomicInteger(-1);
+        Set<Integer> startedBefore = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        cycleSettled.clear();
+        cycleDeadlineMs = deadlineMs;
         final OpsHostMap clusterMap = opsClusters;
         final java.util.concurrent.atomic.AtomicLong vmWaitMax =
                 new java.util.concurrent.atomic.AtomicLong();
@@ -942,7 +1021,15 @@ final class CycleEngine {
             final int position = idx;
             final Plan plan = plan(c);
             futures.put(c.moid, pool.submit(() -> {
-                furthestStarted.accumulateAndGet(position, Math::max);
+                // Build 19 (T4 (d)): a cluster picked up at or after the
+                // deadline times out at once without a call; counting it as
+                // attempted let the rotation reach the end of the list every
+                // overloaded cycle, so the same clusters completed each cycle
+                // and the rest never did. Only a start before the deadline counts.
+                if (clock.getAsLong() < deadlineMs) {
+                    furthestStarted.accumulateAndGet(position, Math::max);
+                    startedBefore.add(position);
+                }
                 int now = inFlight.incrementAndGet();
                 maxInFlight.accumulateAndGet(now, Math::max);
                 try {
@@ -1006,6 +1093,20 @@ final class CycleEngine {
         // completed, failed, timed out or cut.
         int furthest = furthestStarted.get();
         if (furthest >= 0) lastAttempted = scope.get(furthest).moid;
+        restartAt = null;
+        Set<String> cutNow = new HashSet<>();
+        for (int p = 0; p < scope.size(); p++) {
+            String moid = scope.get(p).moid;
+            if (!startedBefore.contains(p) || cycleSettled.contains(moid)) continue;
+            cutNow.add(moid);
+            // Review W1: never with one worker, where the restarted cluster
+            // would hold the only worker; the rotation alone moves on.
+            if (restartAt == null && workers > 1 && p >= workers
+                    && !cutLastCycle.contains(moid)) {
+                restartAt = moid;
+            }
+        }
+        cutLastCycle = cutNow;
         if (fatalError != null) {
             // Review B1: the pool is shut down above; the error ends the cycle.
             log.error("cycle " + id + ": " + fatalError.getClass().getSimpleName()
@@ -1076,6 +1177,8 @@ final class CycleEngine {
         final Set<String> vms = new TreeSet<>();
         int vdisks;
         boolean opsVmMiss;
+        /** Build 19: remote refs outside the queried cluster. */
+        final Set<String> remote = new TreeSet<>();
     }
 
     /** Apply one worker message on the caller thread. @return its perf-call ms */
@@ -1093,6 +1196,9 @@ final class CycleEngine {
             res.tierEntities[ti] += t.entities;
             res.tierSeriesKept[ti] += t.seriesKept;
             res.tierUnresolved[ti] += t.unresolvedEntities;
+            res.tierLabelsDropped[ti] += t.labelsDropped;
+            if (!t.droppedNames.isEmpty()) droppedInfo(t.type, t.droppedNames);
+            clusterIds.remote.addAll(t.remoteUnresolved);
             res.entitiesUnparsed += t.unparsed;
             if (t.landingUnparsedParts > 0) {
                 landingWarn(t.type, t.landingUnparsedParts);
@@ -1151,6 +1257,9 @@ final class CycleEngine {
             res.tierCallMs[i] += d.tierCallMs[i];
             res.tierLearnedSkips[i] += d.tierSkips[i];
             res.learnedSkips += d.tierSkips[i];
+        }
+        if (d.outcome != Outcome.TIMED_OUT || d.endedAt < cycleDeadlineMs) {
+            cycleSettled.add(d.cluster.moid);
         }
         switch (d.outcome) {
             case OK: res.clustersOk++; break;
@@ -1214,7 +1323,16 @@ final class CycleEngine {
      * {@link #refreshClusterMap}).
      */
     private void clusterIdentityAfterCycle(Ids ids, Result res) {
-        res.clustersUnresolved = ids.unresolvedUuids.size() + ids.missedMoids.size();
+        res.clustersUnresolved = ids.unresolvedUuids.size() + ids.missedMoids.size()
+                + ids.remote.size();
+        Set<String> remote = new TreeSet<>(ids.remote);
+        remote.removeAll(remoteWarned);
+        if (!remote.isEmpty()) {
+            remoteWarned.addAll(remote);
+            log.warn(remote.size() + " remote (HCI Mesh) entity id(s) in the performance data are "
+                    + "not an object of the queried cluster; their data is dropped and counted in "
+                    + "clusters_unresolved (not repeated until the next host map refresh)");
+        }
         Set<String> fresh = new TreeSet<>(ids.unresolvedUuids);
         fresh.removeAll(unresolvedClusterWarned);
         if (!fresh.isEmpty()) {
@@ -1239,6 +1357,33 @@ final class CycleEngine {
                         + "pushed (first: " + ids.missedMoids.iterator().next() + ")");
             }
         }
+    }
+
+    /**
+     * Build 19: INFO once per type per day naming the labels the service
+     * returned that the scope's catalog lacks (names only, never an id; a
+     * name that does not look like a vSAN label is counted, not echoed).
+     */
+    private void droppedInfo(EntityType type, List<String> names) {
+        long now = clock.getAsLong();
+        Long last = droppedInfoAt.get(type);
+        if (last != null && now - last < LANDING_WARN_MS) return;
+        droppedInfoAt.put(type, now);
+        StringBuilder shown = new StringBuilder();
+        int other = 0;
+        for (String n : names) {
+            if (n.matches("[A-Za-z0-9_]{1,80}")) {
+                if (shown.length() > 0) shown.append(", ");
+                shown.append(n);
+            } else {
+                other++;
+            }
+        }
+        log.info(type.id + ": labels not in this pack's " + settings.scope.label
+                + "-scope catalog were returned and dropped (counted in PERF tier labels_dropped): "
+                + (shown.length() > 0 ? shown : "-")
+                + (other > 0 ? "; " + other + " not shown" : "")
+                + " (not repeated for this type today)");
     }
 
     /** Review N5: WARN once per type per day for ids of the wrong form (count and part count only). */
@@ -1448,7 +1593,7 @@ final class CycleEngine {
                         vmReadFailed = true;
                     }
                 }
-                if (type == EntityType.VIRTUAL_DISK
+                if (type.form.isPath()
                         && (vmReadFailed || vms == null || !vms.withDevices)) {
                     // v2 failure table: virtual-disk needs a current device map. When
                     // the due read failed, the previous map may place a moved disk on
@@ -1482,8 +1627,10 @@ final class CycleEngine {
                 String faultKey = "-";
                 int status = 0;
                 boolean stop = false;
+                boolean strike = false;
                 try {
-                    pc = vc.queryPerf(c.moid, type, windowStart, windowEnd, budget);
+                    pc = vc.queryPerf(c.moid, type, settings.scope, windowStart, windowEnd,
+                            budget);
                     status = pc.status;
                 } catch (VsanFault f) {
                     faultKey = f.firstKey() != null ? f.firstKey() : f.faultClass;
@@ -1499,6 +1646,19 @@ final class CycleEngine {
                             if (exemptFaultLogged.add(c.moid + '\u0000' + type.id)) {
                                 log.info("cluster " + c.moid + " does not offer " + type.id
                                         + " (" + f.faultClass + "); still queried every cycle");
+                            }
+                        } else if (type.faultStrikes) {
+                            // v3 Q5: an optional type; learned after three in a row.
+                            strike = true;
+                            failedCalls++;
+                            optional.add(new OptionalFailure(type, type.id + ": "
+                                    + f.getMessage()));
+                            if (learned.strike(c.moid, type, clock.getAsLong())) {
+                                log.info("cluster " + c.moid + ": " + type.id + " faulted ("
+                                        + f.faultClass + ") " + LearnedTypes.FAULT_STRIKES
+                                        + (type.tier == EntityType.Tier.VM ? " VM runs"
+                                                : " cycles") + " in a row; not queried there "
+                                        + "for about 24 h");
                             }
                         } else if (learned.learn(c.moid, type, clock.getAsLong())) {
                             log.info("cluster " + c.moid + " does not offer " + type.id + " ("
@@ -1547,6 +1707,7 @@ final class CycleEngine {
                     callMs += ms;
                     tierCallMs[type.tier.ordinal()] += ms;
                     if (pc == null) learned.answered(c.moid, type);
+                    if (!strike) learned.noStrike(c.moid, type);
                     perf("PERF call cycle=" + id + " cluster=" + c.moid + " type=" + type.id
                             + " tier=" + type.tier.label + " parse=stream worker=" + worker
                             + " queue_wait_ms=" + queueWaitMs + " wall_ms=" + ms + " status="
@@ -1605,9 +1766,11 @@ final class CycleEngine {
             outcome = Outcome.FAILED;
             warn = first(warn, "internal error (" + t.getClass().getSimpleName() + ")");
         } finally {
-            ClusterDone d = new ClusterDone(c, outcome, calls, callMs, clock.getAsLong() - t0,
+            long ended = clock.getAsLong();
+            ClusterDone d = new ClusterDone(c, outcome, calls, callMs, ended - t0,
                     warn, fatal, fatalError, tierCalls, tierCallMs, tierSkips, optional,
                     plan.vmRun);
+            d.endedAt = ended;
             if (!put(queue, d, deadlineMs) && fatalError != null) {
                 queue.offer(d);
             }
@@ -1726,6 +1889,8 @@ final class CycleEngine {
         List<EntityRows> out = new ArrayList<>();
         TypeDone td = new TypeDone(c, type, out, new HashSet<>(), new HashSet<>());
         td.entities = r.entities.size();
+        td.labelsDropped = r.labelsDropped;
+        td.droppedNames = r.droppedNames;
         td.seriesKept = r.seriesKept;
         td.unparsed = r.malformed;
         td.malformedParts = r.malformedParts;
@@ -1741,7 +1906,7 @@ final class CycleEngine {
             if (target == EntityType.Target.CLUSTER_OR_HOST) {
                 if (e.ref.uuid.equals(clusterUuid)) {
                     target = EntityType.Target.CLUSTER;
-                } else if (isNodeOf(c, e.ref.uuid)) {
+                } else if (type.landsOnHost() && isNodeOf(c, e.ref.uuid)) {
                     target = EntityType.Target.HOST;
                 } else {
                     td.unparsed++;
@@ -1765,8 +1930,14 @@ final class CycleEngine {
             } else if (target == EntityType.Target.VM) {
                 kind = OpsHostMap.VIRTUAL_MACHINE;
                 String vmMoid;
-                if (type.form == EntityType.IdForm.PATH) {
+                if (type.form.isPath()) {
                     VmInventory.Disk d = vms == null ? null : vms.disk(e.ref.uuid);
+                    if (type.remote && vms != null && d == null) {
+                        // v3 Q6: not a disk of the queried cluster's VMs.
+                        td.remoteUnresolved.add(e.ref.uuid);
+                        td.unresolvedEntities++;
+                        continue;
+                    }
                     if (d == null || d == VmInventory.UNPLACEABLE) {
                         td.vdisksUnresolved++;
                         td.unresolvedEntities++;
@@ -1779,6 +1950,12 @@ final class CycleEngine {
                     instance = d.busPosition;
                 } else {
                     vmMoid = vms == null ? null : vms.vmMoid(e.ref.uuid);
+                    if (vmMoid == null && type.remote && vms != null) {
+                        // v3 Q6: compute elsewhere, storage here; never re-read for it.
+                        td.remoteUnresolved.add(e.ref.uuid);
+                        td.unresolvedEntities++;
+                        continue;
+                    }
                     if (vmMoid == null) {
                         td.vmsUnresolved.add(e.ref.uuid);
                         td.unresolvedEntities++;
@@ -1803,6 +1980,12 @@ final class CycleEngine {
                         td.unresolvedEntities++;
                         continue;
                     }
+                } else if (type.remote && !isNodeOf(c, e.ref.uuid)) {
+                    // v3 Q6: a host of another cluster or vCenter; never landed
+                    // on another in-scope cluster's host (double collection).
+                    td.remoteUnresolved.add(e.ref.uuid);
+                    td.unresolvedEntities++;
+                    continue;
                 } else {
                     moid = nodeToHost.get(e.ref.uuid);
                     if (moid == null) {
@@ -1818,7 +2001,8 @@ final class CycleEngine {
                     continue;
                 }
             }
-            EntityRows er = new EntityRows(Watermarks.hash(e.ref.raw), type.size(), rid, kind,
+            EntityRows er = new EntityRows(Watermarks.hash(e.ref.raw),
+                    type.size(settings.scope), rid, kind,
                     type.tier);
             for (PerfParser.Sample s : e.samples) {
                 er.keys.add(type.statKey(instance, s.metric));

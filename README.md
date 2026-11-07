@@ -8,7 +8,13 @@ HostSystem, ClusterComputeResource and VirtualMachine objects, as keys under
 one object, the "VCF Content Factory vSAN Performance Collector" its cycle
 runs for.
 
-Version 1.1.0 (build 11) covers 33 entity types, 451 keys, in five tiers:
+Version 1.2.0 (build 19) adds a **Metric scope** setting (Advanced):
+`dashboard`, the default and the behaviour of every earlier version, or
+`all`, which collects every metric of the 69 vSAN Performance Service entity
+types the Python vsanhostmetrics pack models (1,805 keys: its 1,595, `Actual`
+twins left out, plus 210 ESA dedup metrics the 9.1.1 service returns beyond
+that model), in the same tiers. At dashboard scope the pack covers
+33 entity types, 451 keys, in five tiers:
 the always-on core (Build 1: DOM owner, DOM client, vSAN physical NICs, 61
 keys), the host tier (13 types, 149 keys on HostSystem) and the cluster tier
 (10 types, 189 keys on ClusterComputeResource), both on by default, and the
@@ -17,10 +23,16 @@ types, 21 keys on VirtualMachine), both off by default. On a 5-host ESA
 cluster the default tiers are 1,186 series per cycle (390 core, 705 host
 tier, 91 cluster tier); the disk tier adds 50, the VM tier up to 2,400 per VM
 run (30 VMs). Every key, unit and self-metric: [REFERENCE.md](REFERENCE.md).
-Design: the factory's `knowledge/designs/vsanperf-mp-v1.md` and
-`vsanperf-mp-v2.md` with its P2 addendum.
+Under `all` the same 5-host cluster pushes 6,758 values per bucket with the
+default tiers (about 6x per host, 4x per cluster). Design: the factory's
+`knowledge/designs/vsanperf-mp-v1.md`, `vsanperf-mp-v2.md` with its P2
+addendum, and `vsanperf-mp-v3.md` with its decisions addendum.
 
 ## Keys
+
+At dashboard scope (the default; under `all` most of these groups carry more
+keys, REFERENCE.md has every key with its scope):
+
 
 | Tier | Group (`vSAN Perf\|<group>\|...`) | Entity type | Lands on | Instance | Keys |
 |---|---|---|---|---|---|
@@ -58,11 +70,32 @@ Design: the factory's `knowledge/designs/vsanperf-mp-v1.md` and
 | vm | `Virtual Disk:<busN:M>` | `virtual-disk` | VirtualMachine | bus position (`scsi0:0`) | 7 |
 | vm | `vSCSI:<scsiN:M>` | `vscsi` | VirtualMachine | virtual SCSI device | 8 |
 
+Under `metric_scope=all` only (36 more types, in the same tiers; keys
+per object):
+
+| Tier | Groups (entity types) | Lands on | Keys |
+|---|---|---|---|
+| cluster | `ESA Dedup DOM Comp Mgr` 42, `ESA Dedup DOM Owner` 82, `ESA Dedup Chunk Service` 33, `ESA Dedup Hash Service` 39, `Data Protection` 1, `Resync` 24, `PMem` 8, `Remote DOM Client` 8, `Compute Remote DOM Client` 8 | ClusterComputeResource (`Resync` and `PMem` by runtime landing; the remote types only for the queried cluster) | 245 |
+| host | the four ESA Dedup groups (per host), `vSAN Sparse` 21, `RDT Network` 1, `System Memory` 3, `LSOM World:<world>-<id>` 2, `Heap:<heap>` 1, `Slab:<slab>` 1, `CLOM` 2, `CMMDS Workload` 23, `Distribution` 5, `PMem` 8, `Remote DOM Client` 11, `Compute Remote DOM Client` 11, `iSCSI` 10, `iSCSI Target:<target>` 10, `iSCSI LUN:<target>/<lun>` 10, `pCPU` and `pCPU:<cpu>` 3, `DOM World:<world>-<id>` 3 | HostSystem | 321 |
+| disk | `Disk Group:<disk uuid>` 38, `CLOM Disk:<disk uuid>` 3, `Disk Health:<disk uuid>` 10 | HostSystem | 51 |
+| vm | `Remote VM` 6, `Remote Virtual Disk:<busN:M>` 3, `Remote vSCSI:<scsiN:M>` 6 | VirtualMachine | 15 |
+
+`DOM World` (and `LSOM World`) instances are named after the vSAN world and
+its id, which change when a host reboots: new instances appear and the old
+ones stop receiving data (accepted, design Q8; `exclude_types=dom-world-cpu`
+leaves them out). On 9.1.1 nine of the new types (`clom-host`, `clom-disk`,
+`cmmds-workload`, `ddh-disk`, `heap-memory`, `slab-memory` and the three
+remote VM types) fault on every query form; they count as optional failures
+until learned after three faults, then cost one call per cluster per day.
+
 **Tier settings** (Advanced): `tier_host` and `tier_cluster` (default
 `true`), `tier_disk` and `tier_vm` (default `false`), `vm_tier_every_n_cycles`
 (default 3), and `exclude_types` (comma list of entity type ids). An account
 upgraded from 1.0.0.9 gets the host and cluster tiers on and the disk and VM
 tiers off; set host and cluster to `false` for Build 1 behaviour.
+`metric_scope` (default `dashboard`; an account upgraded from 1.1.0 keeps
+`dashboard`, nothing changes) applies after the tiers and before
+`exclude_types`; a saved change restarts learned types and dedup marks.
 
 ## How it collects
 
@@ -75,16 +108,24 @@ tiers off; set host and cluster to `false` for Build 1 behaviour.
   uuid.
 - One Performance Service call per entity type in scope per vSAN cluster
   per cycle (one wildcard query per type, the API's floor), 7-minute
-  window, labels filter, gzip: 3 with the tiers off, 26 with the defaults
+  window, labels filter (none under `metric_scope=all`), gzip: 3 with the tiers off, 26 with the defaults
   on the first cycles and 23 on the lab once its empty types are learned;
   with all tiers 33 then 28 on the cluster's VM cycle (every 3rd), 30 then
-  25 on the others. Responses are parsed from the gzip stream one entity at
+  25 on the others; under `all` 56, 54, then 37 with the defaults on the lab
+  (REFERENCE.md "Collection per cycle"). Responses are parsed from the gzip stream one entity at
   a time; VM-type calls run one at a time across the pool.
   Clusters run through a bounded pool (**Parallel clusters**, default 4);
   each cluster's calls run in order: core (DOM owner first), then the
   cluster, host, disk and VM tiers. Each cycle starts after the last cluster
-  the previous cycle attempted, so a cluster that always runs past the
-  deadline cannot starve the ones after it.
+  the previous cycle started before its deadline, so a cluster that always
+  runs past the deadline cannot starve the ones after it; since build 19,
+  with two or more workers, a cluster the cycle deadline cut after it
+  started late in the cycle (not one the workers started with, not one cut
+  the cycle before too, and not one that timed out on its own call before
+  the deadline) goes first next cycle instead of waiting for the rotation to
+  come round. Cost: a cluster too slow to finish even then holds one worker
+  for that next cycle, once per rotation lap; with **Parallel clusters** 1
+  the rule is off and the rotation alone moves on.
 - A type that answers empty 3 cycles in a row on a cluster is not queried
   there for about a day (core types and `ioinsight` never); see
   REFERENCE.md "Learned types". A settings change builds a new `CycleEngine`,
@@ -177,6 +218,45 @@ Install on VCF Operations 8.18, 9.0 and 9.1 (design T5) and check, on each:
    object survive, the new settings show their defaults (both tiers on),
    and the Build 1 keys continue without a gap.
 
+7. **Build 19, `metric_scope` (design v3 T5; devel 9.0.2 against
+   `vcf-lab-mgmt-cl01` first, all four tiers on, N = 3, timing logging on,
+   then 8.18 and 9.1).**
+   1. Upgrade in place from 1.1.0.18: the account keeps `dashboard`
+      (Metric scope shows its default); `perf_calls` 25 / 28 and the series
+      as before.
+   2. Set `metric_scope=all` and save. Cycle 1: `perf_calls` 63 (69 on the
+      VM run); cycles 2 and 3: 61 (67); from cycle 4: **39 (42)**. The
+      design's 55 / 58 for cycles 2 and 3 assumed the nine Q5 types learned
+      at the first fault; the decisions addendum makes them optional types
+      learned after three faults, so they are still called on cycles 2 and 3
+      (VM types: on the first three VM runs).
+   3. Learned (lab): `cluster-pmem` and `host-pmem` at cycle 1
+      (`NotSupported`, "does not offer"); the nine Q5 types after three
+      faults ("faulted (InvalidArgument) 3 cycles in a row"; meanwhile
+      `optional_calls_failed` counts them and `last_error` names one);
+      the 16 empty types after three empty cycles ("answered empty"); and
+      `ioinsight` every cycle.
+   4. `series_pushed`: the first cycle about twice the steady value (both
+      buckets, marks reset); `PERF tier ... scope=all labels_dropped=` shows
+      the `Actual` twins only (pNIC 24, TCP/IP 10, vNIC 7 per entity); one
+      INFO per type per day names the dropped labels; `entities_unparsed`
+      and the `*_unresolved` counters 0.
+   5. Read back, waiting at least 6 minutes for the cluster key: host
+      `vSAN Perf|System Memory|totalMbMemUsed` and `pctMemUsed` (integer
+      percent, as in the cycle's `PERF` log), cluster
+      `vSAN Perf|Data Protection|totalSnapshotCapacity`, host
+      `vSAN Perf|pCPU:cpu-0|pcpuUsedPct` and the aggregate
+      `vSAN Perf|pCPU|pcpuUsedPct`; each equal to a same-window JSON query.
+   6. Browser pass: how `pCPU` beside `pCPU:cpu-0`, and
+      `DOM World:VSAN_0x..._CompServer-<id>`, render in the Metrics tab.
+   7. Set back to `dashboard`: the next cycle makes 30 calls (33 on the VM
+      run), steady 25 / 28 from cycle 4; both buckets re-sent once, then
+      about 2,994 values; the read-back keys above get no newer sample;
+      "answered empty" lines reappear at cycle 3 for the dashboard empties
+      (learned state reset).
+   8. After a host reboot: `DOM World` instances of that host change (new
+      world ids); the old ones stop receiving data (accepted, design Q8).
+
 **Results so far (devel 9.0.2, build 5).** Check 1 passed: all 12 values
 read back on the instance; 390 series pushed, keys on all 5 hosts at the
 newest bucket, cycle 1.0 s, 5.69 calls/s. Check 2 **failed**: an
@@ -206,6 +286,23 @@ collector log scan (needs a Cloud Proxy login). Neither credential is in
 the lab profile.
 
 ## Scale verification (issue #6)
+
+**Build 19 (design v3, `metric_scope=all`).** `--scope all` builds every
+type's reply from its P3 capture (69 types, no labels filter, faults and
+empty echoes as served on the lab), so the `all` rows below run on what the
+9.1.1 service actually returns: 8,040 newest values per 6-host cluster
+(7,692 on the hosts, 348 on the cluster; series whose newest token is
+`None` push nothing). Under the per-vCenter ceiling `all` never fits 240 s
+at 70 clusters (the design's R21): about 44 clusters complete per cycle once
+learned, and every cluster completes at least once in any two consecutive
+cycles, and over all 12 cycles in any four. That needed the rotation fix of
+build 19 (CHANGELOG 1.2.0.19, refined in 1.2.0.20):
+before it, 51 of 70 clusters completed in two cycles and 19 never did.
+Before the learned state builds up (cycles 1 to 8, longer than the design's
+estimate because the nine Q5 types take three faults to learn and a cluster
+learns only when it is reached) only 28 to 40 complete per cycle. Under the
+per-cluster ceiling `all` fits with 4 workers, as the design's model says
+(186 s, then 127 s).
 
 **Delivered (builds 14 to 18): design T3 and T4**, in simulated time against
 the verbatim captures (`tests/.../ReplayHarness.java`, gate
@@ -241,7 +338,15 @@ Every row is asserted in CI:
 | (b) all tiers, VM N = 3, per vCenter (deadline path taken; heap < 65 / 50 MB, retained < 35 MB) | 1,602 to 1,679 calls in 240 s, 51 to 53 of 70 done | 1,630 to 1,644 calls, 60 of 70 done | 38 to 76 s | 33.7 MB (26.6 MB) | passes |
 | (b') all tiers, VM N = 3, per cluster (every cluster done every cycle; same heap limits) | 2,148 to 2,190 calls, 116 to 127 s, all done | 1,822 calls, 107 s, all done | 50 to 93 s | 34.0 MB (27.9 MB) | passes |
 | (c) all tiers, VM N = 1, per vCenter (heap only, same limits) | 1,551 to 1,598 calls, 47 to 48 of 70 done | same | 74 to 150 s | 34.3 MB (27.2 MB) | passes |
+| (d) `metric_scope=all`, default tiers, per vCenter (deadline path every cycle; every cluster done at least once in any four consecutive cycles over all 12; from cycle 10, once learning has settled, in any two; the completed clusters' 8,040 values each in the newest bucket; heap < 65 / 50 MB, retained < 35 MB) | 1,512 to 1,681 calls in 240 s, 28 of 70 done (56 calls each, nothing learned yet) | from cycle 9: 1,628 to 1,681 calls, 44 of 70 done, 70 of 70 over any two cycles; cycles 6 to 8 are the warm-up (30 to 40 done) | 4.7 to 6.5 s | 21.7 MB (5.7 MB) | passes |
+| (d') `metric_scope=all`, default tiers, per cluster (all done every cycle; perf phase <= 200 s on cycles 1 to 3, <= 135 s from cycle 4; 3,920 / 3,780 / 2,590 calls; 562,800 values) | 3,920 calls, 186.4 s; cycles 2 and 3: 3,780 calls, 181.3 s | 2,590 calls, 126.5 s | 5.5 s (11.1 s cold) | not measured | passes |
+| (e) `metric_scope=all`, all tiers, VM N = 3, per cluster (all done every cycle, perf phase < 240 s; heap < 65 MB, own ceilings since build 20: peak < 60 MB, retained < 45 MB) | 4,366 to 4,554 calls, 216.6 to 230.3 s, all done | 2,874 calls, 155.2 s, all done | 55 to 98 s | 38.5 to 46.1 MB (31.2 to 32.4 MB) | passes |
 
+(e)'s ceilings (build 20) are sized on its readings so a ~9 MB sampler
+spike on top of the highest peak (55 MB) does not fail it; (a) keeps 15 MB
+against readings of 6.3 to 7.5 MB because that is what catches build 14's
+regression, and it once read 16.3 MB on such a spike (a run started as a
+CPU-load run ended): re-run a red (a) before reading it as a regression.
 Before build 15 the VM cases peaked at 70.8 to 76.6 MB. Heap: used heap
 after `System.gc()`, sampled every 150 ms of wall time during each cycle,
 minus a baseline taken before the engine exists; about 1 MB of noise, and a
@@ -261,12 +366,23 @@ clusters, as the design's call plan says), not by the push.
   has decides whether the default tiers fit a 5-minute cycle at 70 clusters
   (230 s under the per-vCenter model, 79 s under the per-cluster one). Read
   it from `PERF cycle` on a multi-cluster vCenter with timing logging on.
-- The platform acceptance above (design T5).
+- The platform acceptance above (design T5), including check 7 for
+  `metric_scope`.
+- Under `all`: the Suite API's ingest of ~44 MB per cycle at 70 x 6 and the
+  Ops-side cost of ~5.6x the series (design Q9, Q10), and whether the nine
+  Q5 types answer on an 8.0 U3 or 9.0 vCenter (P3 found no 9.0 or 8.x vSAN
+  vCenter in the lab).
 
 ## Migrating from the Python vsanhostmetrics pack
 
 This pack is a different adapter kind (`vcfcf_vsanperf`, the Python pack is
-`VsanHostMetrics`), so it is **not an upgrade**. Both can run side by side
+`VsanHostMetrics`), so it is **not an upgrade**. The Python pack 2.0.0 collects
+"everything" by default; this pack's `metric_scope=all` is the like-for-like
+comparison, without the `Actual` twins (identical values) and the Python
+pack's 2 computed metrics, and with 210 ESA dedup metrics the Python model
+lacks. Note one unit difference: the Python pack divides `pctMemUsed` by 10
+(per mille); the service serves an integer percent (P3), which this pack
+pushes as served. Both can run side by side
 while you compare. To move over: install this pack, create its account and
 credentials, compare, then uninstall the Python pack. **No data carries
 over:** the Python pack's per-entity objects and their history are removed

@@ -15,6 +15,13 @@ import java.util.concurrent.ConcurrentHashMap;
  *     in one cycle do not all re-probe in one cycle the next day. A re-probe
  *     that comes back empty re-learns at once (no new 3-cycle count); one
  *     that returns data, or any non-empty answer or fault, resets the count.
+ * <li><b>Fault strikes</b> (Build 19, design v3 Q5): the types flagged
+ *     {@link EntityType#faultStrikes} (the nine that fault
+ *     {@code InvalidArgument: entityRefId} on every ref form on 9.1.1, P3)
+ *     are learned like an empty echo: after {@link #FAULT_STRIKES}
+ *     consecutive type-unavailable faults on that cluster, with the same
+ *     re-probe spread; a re-probe that faults again re-learns at once. Any
+ *     other answer starts the count over.
  * </ul>
  * Never learned: the three core types on an empty echo
  * ({@link EntityType#learnsEmpty}), and {@code ioinsight} at all, which is
@@ -26,12 +33,16 @@ final class LearnedTypes {
     static final long SKIP_MS = 24L * 60 * 60 * 1000;
     /** Consecutive empty cycles before an empty type is learned. */
     static final int EMPTY_CYCLES = 3;
+    /** Consecutive type-unavailable faults before a strike type is learned (v3 Q5). */
+    static final int FAULT_STRIKES = 3;
     /** Re-probe spread: the offset is {@code stableHash mod} this many minutes. */
     static final int SPREAD_MINUTES = 60;
 
     private final ConcurrentHashMap<String, Long> until = new ConcurrentHashMap<>();
     /** Consecutive empty answers; at or above the threshold after a learned period ends. */
     private final ConcurrentHashMap<String, Integer> emptyStreak = new ConcurrentHashMap<>();
+    /** Consecutive type-unavailable faults of a strike type (v3 Q5). */
+    private final ConcurrentHashMap<String, Integer> faultStreak = new ConcurrentHashMap<>();
 
     private static String key(String clusterMoid, EntityType type) {
         return clusterMoid + '\u0000' + type.id;
@@ -77,6 +88,33 @@ final class LearnedTypes {
         return true;
     }
 
+    /**
+     * A type-unavailable fault on a strike type (v3 Q5).
+     *
+     * @return true when this fault learned the type (log it)
+     */
+    boolean strike(String clusterMoid, EntityType type, long nowMs) {
+        if (exempt(type)) return false;
+        String k = key(clusterMoid, type);
+        emptyStreak.remove(k);
+        int n = faultStreak.merge(k, 1, Integer::sum);
+        if (n < FAULT_STRIKES) return false;
+        faultStreak.put(k, FAULT_STRIKES);
+        until.put(k, nowMs + SKIP_MS + offsetMs(clusterMoid, type));
+        return true;
+    }
+
+    /** Anything but a type-unavailable fault: the strike count starts over. */
+    void noStrike(String clusterMoid, EntityType type) {
+        faultStreak.remove(key(clusterMoid, type));
+    }
+
+    /** Consecutive strikes recorded (tests). */
+    int strikes(String clusterMoid, EntityType type) {
+        Integer n = faultStreak.get(key(clusterMoid, type));
+        return n == null ? 0 : n;
+    }
+
     /** Data, or a fault: the empty count starts over. */
     void answered(String clusterMoid, EntityType type) {
         emptyStreak.remove(key(clusterMoid, type));
@@ -97,5 +135,6 @@ final class LearnedTypes {
     void clear() {
         until.clear();
         emptyStreak.clear();
+        faultStreak.clear();
     }
 }

@@ -56,6 +56,13 @@ final class VsanPerfConfig {
     final boolean tierVm;
     /** Build 11: the VM tier runs on every Nth cycle per cluster, staggered (1 to 12, default 3). */
     final int vmEveryN;
+    /**
+     * Build 19 (design v3 "Setting: metric_scope"): {@code dashboard} (the
+     * default, and the value of an account saved before 1.2.0) or {@code all}.
+     * Re-read on reconfigure like the tiers: a saved change builds a new
+     * engine, so learned types and dedup marks restart.
+     */
+    final EntityType.Scope scope;
     /** The entity types this instance queries, in collection order (never empty). */
     final List<EntityType> types;
     /** Entity type ids in Entity types to exclude that this build does not know (configure WARN). */
@@ -86,6 +93,15 @@ final class VsanPerfConfig {
             String exclude, String workers, String callTimeout, String cycleDeadline,
             String perfTiming, String tierHost, String tierCluster, String tierDisk,
             String tierVm, String vmEveryN, String excludeTypes) {
+        this(vcenterHost, username, password, include, exclude, workers, callTimeout,
+                cycleDeadline, perfTiming, tierHost, tierCluster, tierDisk, tierVm, vmEveryN,
+                excludeTypes, null);
+    }
+
+    VsanPerfConfig(String vcenterHost, String username, String password, String include,
+            String exclude, String workers, String callTimeout, String cycleDeadline,
+            String perfTiming, String tierHost, String tierCluster, String tierDisk,
+            String tierVm, String vmEveryN, String excludeTypes, String metricScope) {
         this.vcenterHost = validHost(vcenterHost);
         this.baseUrl = buildBaseUrl(this.vcenterHost);
         if (username == null || username.trim().isEmpty()) {
@@ -109,12 +125,16 @@ final class VsanPerfConfig {
         this.tierVm = tierFlag(tierVm, "VM tier", false);
         this.vmEveryN = intSetting(vmEveryN, DEFAULT_VM_EVERY_N, 1, MAX_VM_EVERY_N,
                 "VM tier every N cycles");
+        this.scope = scopeSetting(metricScope);
         Set<EntityType.Tier> tiers = EnumSet.of(EntityType.Tier.CORE);
         if (this.tierHost) tiers.add(EntityType.Tier.HOST);
         if (this.tierCluster) tiers.add(EntityType.Tier.CLUSTER);
         if (this.tierDisk) tiers.add(EntityType.Tier.DISK);
         if (this.tierVm) tiers.add(EntityType.Tier.VM);
-        List<EntityType> scope = EntityType.ofTiers(tiers);
+        // v3 composition: tiers, then the scope's types, then exclude_types,
+        // which may name any of the 69 ids under either scope (a new-type id
+        // under dashboard is known and silently not in scope).
+        List<EntityType> scope = EntityType.ofTiers(tiers, this.scope);
         List<String> unknown = new ArrayList<>();
         for (String id : ClusterFilter.items(excludeTypes)) {
             EntityType t = EntityType.byId(id.toLowerCase(Locale.ROOT));
@@ -150,6 +170,18 @@ final class VsanPerfConfig {
                 + " not an entity type this build collects, ignored"
                 + (names.length() > 0 ? " (" + names + ")" : "")
                 + (other > 0 ? "; " + other + " not shown (not an entity type id)" : "");
+    }
+
+    /**
+     * Metric scope: empty (an account saved before 1.2.0) is {@code dashboard};
+     * otherwise {@code dashboard} or {@code all}, any case.
+     */
+    static EntityType.Scope scopeSetting(String raw) {
+        String s = raw == null ? "" : raw.trim();
+        if (s.isEmpty()) return EntityType.Scope.DASHBOARD;
+        EntityType.Scope sc = EntityType.Scope.parse(s);
+        if (sc == null) throw new IllegalArgumentException("Metric scope must be dashboard or all");
+        return sc;
     }
 
     /**
@@ -210,7 +242,7 @@ final class VsanPerfConfig {
                 + (cycleDeadlineSeconds == 0 ? "interval-60s" : cycleDeadlineSeconds + "s")
                 + " perfTimingLogging=" + perfTimingLogging + " tierHost=" + tierHost
                 + " tierCluster=" + tierCluster + " tierDisk=" + tierDisk + " tierVm=" + tierVm
-                + " vmEveryN=" + vmEveryN + " types=" + types.size();
+                + " vmEveryN=" + vmEveryN + " scope=" + scope.label + " types=" + types.size();
     }
 
     static int intSetting(String raw, int dflt, int min, int max, String label) {

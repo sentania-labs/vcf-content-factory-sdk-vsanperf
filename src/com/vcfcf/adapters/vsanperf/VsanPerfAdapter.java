@@ -99,7 +99,7 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
             CycleEngine engine = new CycleEngine(client, sas == null ? null : opsApi(sas),
                     new CycleEngine.Settings(cfg.filter(), cfg.workers,
                             cfg.callTimeoutSeconds * 1000L, cfg.perfTimingLogging, cfg.types,
-                            cfg.vmEveryN),
+                            cfg.vmEveryN, cfg.scope),
                     pakLog(), System::currentTimeMillis);
             engine.setStopSignal(this::isAbortRequested);
             if (!cfg.unknownExcludes.isEmpty()) {
@@ -134,7 +134,7 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
                 getIdentifier(rc, "tier_host"), getIdentifier(rc, "tier_cluster"),
                 getIdentifier(rc, "tier_disk"), getIdentifier(rc, "tier_vm"),
                 getIdentifier(rc, "vm_tier_every_n_cycles"),
-                getIdentifier(rc, "exclude_types"));
+                getIdentifier(rc, "exclude_types"), getIdentifier(rc, "metric_scope"));
     }
 
     /** The JSON client on the platform trust store with the certificate name checked. */
