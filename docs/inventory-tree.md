@@ -1,13 +1,10 @@
-# Inventory Tree: VCF Content Factory Example Adapter
+# Inventory Tree: VCF Content Factory vSAN Performance
 
-> Generated from `describe.xml` v0.0.0.3. Do not edit: regenerated on every build.
-
-**Traversal Spec:** Example Infrastructure
+> Generated from `describe.xml` v0.0.0.5. Do not edit: regenerated on every build.
 
 ## Traversal Tree
 
-- **Example World** (`World`)
-  - **Example Resource** (`ExampleResource`)
+
 
 > \* = identifying (unique) key
 
@@ -15,5 +12,3 @@
 
 | Kind | Display Label | Identifying Keys | Parent(s) |
 |------|--------------|-----------------|-----------|
-| `World` | Example World | `world_id` * | - |
-| `ExampleResource` | Example Resource | `id` * | Example World |

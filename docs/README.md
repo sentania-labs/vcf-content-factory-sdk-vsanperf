@@ -1,4 +1,4 @@
-# VCF Content Factory Example Adapter Documentation
+# VCF Content Factory vSAN Performance Documentation
 
 > Generated index. The SVG diagram and per-kind table are regenerated on every
 > build; prose sections (overview, installing) are hand-curated.
@@ -18,7 +18,7 @@
 
 ## Quick Reference
 
-- **Adapter kind:** `example_adapter`
-- **Version:** 0.0.0.3
-- **Traversal spec:** Example Infrastructure
-- **Resource kinds:** 2
+- **Adapter kind:** `vcfcf_vsanperf`
+- **Version:** 0.0.0.5
+- **Traversal spec:** (none)
+- **Resource kinds:** 0
