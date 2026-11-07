@@ -98,8 +98,10 @@ instance among the resources it collects, so a cycle run from the
 **Build 7 change.** The cycle now runs in `collect()` for one object the
 pack discovers per instance, "VCF Content Factory vSAN Performance
 Collector" (kind `VsanPerfCollector`), the way the compliance pack runs its
-cycle for `ComplianceWorld`. Its identity is the account's own (vCenter
-Server and Clusters to include), known without a login, so it exists while
+cycle for `ComplianceWorld`. Its identity is the account's own: vCenter
+Server and Clusters to include exactly as entered, trimmed only (`*` when
+Clusters to include is empty), so two accounts that differ only in case or
+spacing get two objects (build 8). It is known without a login, so it exists while
 vCenter is unreachable and the failure takes the framework's normal collect
 path (DOWN for an unreachable target, same credential-free message). The
 self-metrics stay on the adapter instance, where check 1 proved them. The

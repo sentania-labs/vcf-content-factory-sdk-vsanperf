@@ -1,6 +1,6 @@
 # Inventory Tree: VCF Content Factory vSAN Performance
 
-> Generated from `describe.xml` v0.0.0.7. Do not edit: regenerated on every build.
+> Generated from `describe.xml` v0.0.0.8. Do not edit: regenerated on every build.
 
 ## Traversal Tree
 

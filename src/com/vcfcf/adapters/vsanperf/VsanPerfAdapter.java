@@ -261,8 +261,10 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
 
     /**
      * The collector object, identified by the account's own identity
-     * (vCenter Server and Clusters to include), known from the configuration
-     * alone. Not by the vCenter instance UUID: that needs a login, and the
+     * (vCenter Server and Clusters to include) exactly as the account stores
+     * it, trimmed only (build 8: two accounts that differ in case or spacing
+     * are distinct accounts, so they must not share one object key), known
+     * from the configuration alone. Not by the vCenter instance UUID: that needs a login, and the
      * object must exist when vCenter is unreachable for the failure to show
      * as DOWN. An invalid configuration throws (the account shows ERROR with
      * its message).
@@ -281,7 +283,7 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
                 new com.integrien.alive.common.adapter3.ResourceKey(COLLECTOR_NAME,
                         COLLECTOR_KIND, ADAPTER_KIND);
         key.addIdentifier(new com.integrien.alive.common.adapter3.config.ResourceIdentifierConfig(
-                "vcenter", cfg.vcenterHost.toLowerCase(java.util.Locale.ROOT), true));
+                "vcenter", cfg.vcenterHost, true));
         key.addIdentifier(new com.integrien.alive.common.adapter3.config.ResourceIdentifierConfig(
                 "cluster_scope", cfg.clusterScope(), true));
         return new ResourceConfig(key);
