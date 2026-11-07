@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.0.9 (Unreleased)
+
+- fix(adapter): build 9, the cycle summary and the PERF timing lines reach
+  the instance log. On devel 9.0.2 (build 7, factory
+  `knowledge/context/investigations/2026-11-06-vsanperf-proxy-logs.md`)
+  `VsanPerfAdapter_<id>.log` held only lines written through the adapter's
+  own `logInfo`/`logWarn` (configure, framework, `onCollect` WARNs): no
+  cycle summary and no `PERF ` line, also on an instance with timing on and
+  on one failing every cycle. Cause: the engine and the JSON client logged
+  through `componentLogger(CycleEngine.class)` /
+  `componentLogger(VsanJsonClient.class)`, and those lines never reached
+  the file. The summary line itself existed since build 5 (always INFO,
+  once per cycle, failed cycles too); it was simply not delivered. Now every
+  pak line goes through the adapter's `logInfo` / `logWarn` / `logError`,
+  the route proven to land, at INFO (PERF lines included).
+  `perf_timing_logging` is re-read from the instance's stored settings
+  every cycle (it was read only at configure); a change is logged once. New
+  test `EngineTest.summaryAndPerfLinesEveryCycle` captures the log: the
+  summary line on a healthy and a failed cycle, no PERF line with the flag
+  off, `PERF cycle` and `PERF call` lines at INFO once the flag is turned on
+  between cycles, none after it is turned off. REFERENCE.md gains the
+  owner-versus-client reading of the DOM Owner and DOM Client groups and the
+  summary line's format.
+
 ## 0.1.0.8 (Unreleased)
 
 - fix(adapter): build 8, the `VsanPerfCollector` identity is exactly what the

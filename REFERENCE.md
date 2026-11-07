@@ -1,6 +1,6 @@
 # VCF Content Factory vSAN Performance: Reference
 
-Build 0.1.0.8 (Build 1 of the design). Design: the factory's
+Build 0.1.0.9 (Build 1 of the design). Design: the factory's
 `knowledge/designs/vsanperf-mp-v1.md`.
 
 ## Adapter
@@ -79,6 +79,10 @@ did land is overwritten with itself).
 
 ### DOM Owner (`host-domowner`): 38 keys per host
 
+The owner-side I/O for the vSAN objects this host owns: the DOM owner
+coordinates each object's I/O, whichever host's VMs issued it. A busy DOM
+Owner on a host means objects it owns are busy, not necessarily its own VMs.
+
 |Ops stat key|vSAN label|Meaning (Python pack label)|Unit|Transform|
 |---|---|---|---|---|
 |`vSAN Perf\|DOM Owner\|highOIODurationPercentWrite`|`highOIODurationPercentWrite`|High outstanding IO duration percent (write)|none stated|none|
@@ -122,6 +126,10 @@ did land is overwritten with itself).
 
 ### DOM Client (`host-domclient`): 6 keys per host
 
+The I/O this host's VMs issued, as seen from the client side, whichever
+hosts own the objects. This is the closest group to "what my VMs on this
+host experienced".
+
 |Ops stat key|vSAN label|Meaning (Python pack label)|Unit|Transform|
 |---|---|---|---|---|
 |`vSAN Perf\|DOM Client\|congestion`|`congestion`|Congestions|none stated|none|
@@ -159,9 +167,15 @@ magnitudes but are not proven by the API.
 
 ## Logging
 
-INFO every cycle: one summary line. WARN: a failed cluster (fault class and
+Every pak line goes through the adapter's own logger, into
+`VsanPerfAdapter_<instance id>.log` on the collector. INFO every cycle,
+including a failed one: one summary line, `cycle <n> summary: clusters
+ok=.. failed=.. timed_out=.. of ..; perf calls=..; series pushed=.. (..
+already pushed); hosts unresolved=..; push batches ok=.. failed=..; <s> s`,
+with `; FAILED: <reason>` on a failed cycle. WARN: a failed cluster (fault class and
 key), an unclean push, unresolved hosts (once per Ops map refresh). With
-**Performance timing logging** on, `key=value` lines prefixed `PERF call`,
+**Performance timing logging** on (re-read every cycle, so a change takes
+effect on the next cycle without a restart), `key=value` lines prefixed `PERF call`,
 `PERF cluster`, `PERF pool`, `PERF push`, `PERF inventory` and `PERF cycle`
 (perf phase wall ms, calls/s from it, summed and average call ms, push ms,
 heap before and after). No log line, exception message or property carries
