@@ -2,7 +2,11 @@
 <!--
   describe.xml: VCF Content Factory vSAN Performance (vcfcf_vsanperf).
 
-  The pak creates ONE object kind: its adapter instance (type 7). The vSAN
+  The pak creates its adapter instance (type 7) and, since build 7, one
+  "VCF Content Factory vSAN Performance Collector" object per instance: the
+  platform does not list the adapter instance among the resources it
+  collects, so the cycle runs in collect() for that object, and an
+  unreachable vCenter shows the account DOWN. The vSAN
   metrics land on the vCenter adapter's own VMWARE HostSystem objects
   through the Suite API (ARIA_OPS stitching), so they are not declared here:
   a pak cannot declare keys for VMWARE kinds, and pushed keys carry no label
@@ -84,6 +88,18 @@
 				<ResourceAttribute key="last_error" nameKey="32" dataType="string"
 				                   isProperty="true"/>
 			</ResourceGroup>
+		</ResourceKind>
+
+		<!-- Build 7: the per-instance object the cycle runs for. Identity
+		     is the account's own (vCenter Server, Clusters to include as
+		     normalised items or *), known without a login, so it exists
+		     while vCenter is unreachable. No metrics: the self-metrics stay
+		     on the adapter instance. -->
+		<ResourceKind key="VsanPerfCollector" nameKey="40" type="1">
+			<ResourceIdentifier key="vcenter" nameKey="41" type="string"
+			                    required="true" dispOrder="1"/>
+			<ResourceIdentifier key="cluster_scope" nameKey="42" type="string"
+			                    required="true" dispOrder="2"/>
 		</ResourceKind>
 
 	</ResourceKinds>

@@ -26,19 +26,15 @@ import java.util.Map;
  * through the Suite API. The pak creates no object but its adapter
  * instance (design {@code knowledge/designs/vsanperf-mp-v1.md}).
  *
- * <p><b>Where the cycle runs.</b> There is nothing to discover, so the
- * whole cycle runs from the collector's {@code rediscover} hook, the one
- * per-cycle hook that receives the adapter instance resource: the
- * self-metrics ({@code Collection|*}) go onto that resource through the
- * collect result. This differs from compliance, which discovers a
- * {@code ComplianceWorld} object and runs its cycle in {@code collect()}
- * for it. A failed cycle pushes its self-metrics, then throws a
- * credential-free message; {@code collect} on the instance resource, if the
- * platform lists it, rethrows the same failure so the account row maps it
- * (DOWN for an unreachable vCenter). If the platform does not list it, the
- * framework shows ERROR "Resource discovery failed and there was nothing to
- * collect" instead. Which holds is a platform acceptance check (README,
- * review W1).
+ * <p><b>Where the cycle runs (build 7).</b> In {@code collect()} for the
+ * one object the pak discovers per instance ({@link #COLLECTOR_KIND}), as
+ * compliance does for {@code ComplianceWorld}: the platform does not list
+ * the adapter instance among the resources it collects, so build 5's cycle
+ * in {@code rediscover} could only ever show ERROR "nothing to collect"
+ * (devel 9.0.2). A failed cycle now throws from {@code collect()}, and an
+ * unreachable vCenter maps to DOWN. The self-metrics ({@code Collection|*})
+ * still go onto the adapter instance resource, which {@code rediscover}
+ * hands over each cycle.
  *
  * <p>Everything else is SDK-free ({@link CycleEngine}, {@link VsanJsonClient})
  * and tested by {@code ci/run_java_tests.sh}.
@@ -67,9 +63,6 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
     private volatile Runtime runtime;
     /** Why the last configure built nothing; every cycle fails with it. */
     private volatile String configError;
-    /** This cycle's failure, for collect() on the instance resource. */
-    private volatile String cycleFailure;
-    private volatile Throwable cycleFailureCause;
 
     public VsanPerfAdapter() {
         super(ADAPTER_KIND);
@@ -236,34 +229,91 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
     // Collection
     // ------------------------------------------------------------------
 
+    /**
+     * The one object this pak discovers per adapter instance (build 7). The
+     * platform does not list the adapter instance among the resources it
+     * collects (devel 9.0.2, build 5: the account row read "Resource
+     * discovery failed and there was nothing to collect"), so a cycle run
+     * from {@code rediscover} could never report DOWN. The cycle runs in
+     * {@code collect()} for this object instead, the way compliance runs
+     * its cycle for {@code ComplianceWorld}, so an unreachable vCenter is a
+     * normal collect failure mapped to DOWN.
+     */
+    static final String COLLECTOR_KIND = "VsanPerfCollector";
+    static final String COLLECTOR_NAME = "VCF Content Factory vSAN Performance Collector";
+
+    /**
+     * The adapter instance resource of the current cycle, handed to
+     * {@code rediscover} (the self-metrics go onto it, where build 5 proved
+     * they read back on devel 9.0.2).
+     */
+    private volatile ResourceConfig cycleInstance;
+
     @Override
     protected void onCycleStart() {
-        cycleFailure = null;
-        cycleFailureCause = null;
+        cycleInstance = null;
+    }
+
+    @Override
+    protected boolean discoverOnCollect() {
+        return true;
+    }
+
+    /**
+     * The collector object, identified by the account's own identity
+     * (vCenter Server and Clusters to include), known from the configuration
+     * alone. Not by the vCenter instance UUID: that needs a login, and the
+     * object must exist when vCenter is unreachable for the failure to show
+     * as DOWN. An invalid configuration throws (the account shows ERROR with
+     * its message).
+     */
+    @Override
+    protected void enumerateResources(com.vcfcf.adapter.spi.ResourceSink sink) throws Exception {
+        Runtime r = this.runtime;
+        if (r == null) {
+            throw new IllegalStateException(notConfigured());
+        }
+        sink.accept(collectorResource(r.cfg));
+    }
+
+    private static ResourceConfig collectorResource(VsanPerfConfig cfg) {
+        com.integrien.alive.common.adapter3.ResourceKey key =
+                new com.integrien.alive.common.adapter3.ResourceKey(COLLECTOR_NAME,
+                        COLLECTOR_KIND, ADAPTER_KIND);
+        key.addIdentifier(new com.integrien.alive.common.adapter3.config.ResourceIdentifierConfig(
+                "vcenter", cfg.vcenterHost.toLowerCase(java.util.Locale.ROOT), true));
+        key.addIdentifier(new com.integrien.alive.common.adapter3.config.ResourceIdentifierConfig(
+                "cluster_scope", cfg.clusterScope(), true));
+        return new ResourceConfig(key);
+    }
+
+    private String notConfigured() {
+        String invalid = configError;
+        return invalid != null ? "the adapter instance configuration is invalid: " + invalid
+                : "the adapter instance is not configured";
     }
 
     @Override
     protected VcfCfCollector<VsanPerfConfig> getCollector() {
         return new VcfCfCollector<VsanPerfConfig>() {
 
+            /** Only to receive the adapter instance resource; no work, never throws. */
             @Override
             public boolean needsRediscovery(VsanPerfConfig cfg) {
-                return true; // the per-cycle hook with the instance resource
+                return true;
             }
 
             @Override
             public void rediscover(VsanPerfConfig cfg, ManagedHttpClient http,
-                    ResourceConfig adapterInst, AdapterBase adapter) throws Exception {
-                runCycle(adapterInst);
+                    ResourceConfig adapterInst, AdapterBase adapter) {
+                cycleInstance = adapterInst;
             }
 
             @Override
             public void collect(VsanPerfConfig cfg, ManagedHttpClient http, ResourceConfig rc,
                     List<MetricData> out, AdapterBase adapter) throws Exception {
-                String failure = cycleFailure;
-                if (failure != null && ADAPTER_KIND.equals(rc.getResourceKind())) {
-                    throw new java.io.IOException(failure, cycleFailureCause);
-                }
+                if (!COLLECTOR_KIND.equals(rc.getResourceKind())) return;
+                runCycle();
             }
 
             @Override
@@ -274,41 +324,44 @@ public final class VsanPerfAdapter extends VcfCfAdapter<VsanPerfConfig> {
         };
     }
 
-    private void runCycle(ResourceConfig adapterInst) throws Exception {
+    /** One cycle; the self-metrics go onto the adapter instance, then a failure throws. */
+    private void runCycle() throws Exception {
         if (isAbortRequested()) return;
+        final ResourceConfig inst = cycleInstance != null ? cycleInstance : instanceResource();
+        CycleReport.Sink sink = inst == null ? null : new CycleReport.Sink() {
+            private final long now = System.currentTimeMillis();
+
+            @Override public void metric(String key, double value) {
+                pushMetric(inst, key, value, now);
+            }
+
+            @Override public void property(String key, String value) {
+                pushStringProperty(inst, key, value);
+            }
+        };
         Runtime r = this.runtime;
         if (r == null) {
-            String invalid = configError;
-            String msg = invalid != null ? "the adapter instance configuration is invalid: "
-                    + invalid : "the adapter instance is not configured";
-            cycleFailure = msg;
-            pushLastError(adapterInst, msg);
+            String msg = notConfigured();
+            if (sink != null) sink.property(CycleReport.LAST_ERROR, msg);
             throw new IllegalStateException(msg);
         }
         Integer interval = null;
         try {
-            interval = adapterInst == null ? null : adapterInst.getIntervalInSec();
+            interval = inst == null ? getMonitoringIntervalInSec() : inst.getIntervalInSec();
         } catch (RuntimeException ignored) {
             // the default interval applies
         }
         long deadline = System.currentTimeMillis() + r.cfg.deadlineSeconds(interval) * 1000L;
-        CycleEngine.Result res = r.engine.run(deadline);
-        long now = System.currentTimeMillis();
-        if (adapterInst != null) {
-            for (Map.Entry<String, Double> e : res.metrics().entrySet()) {
-                pushMetric(adapterInst, e.getKey(), e.getValue(), now);
-            }
-            pushStringProperty(adapterInst, "Collection|last_error", res.lastErrorProperty());
-        }
-        if (res.failure != null) {
-            cycleFailure = res.failure;
-            cycleFailureCause = res.failureCause;
-            throw new java.io.IOException(res.failure, res.failureCause);
-        }
+        CycleReport.run(r.engine, deadline, sink);
     }
 
-    private void pushLastError(ResourceConfig adapterInst, String msg) {
-        if (adapterInst != null) pushStringProperty(adapterInst, "Collection|last_error", msg);
+    /** {@code AdapterBase.getAdapterInstResource()}, or null. */
+    private ResourceConfig instanceResource() {
+        try {
+            return getAdapterInstResource();
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     @Override

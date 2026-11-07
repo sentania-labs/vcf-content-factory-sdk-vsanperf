@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.1.0.7 (Unreleased)
+
+- fix(adapter): build 7, the cycle runs in `collect()` so an unreachable
+  vCenter shows the account DOWN. Live on devel 9.0.2 (build 5) the stitch
+  and all 12 self-metrics worked, but an unreachable host showed ERROR
+  "Resource discovery failed and there was nothing to collect: IOException:
+  vCenter login or ServiceInstance read failed: Login: ConnectException":
+  the platform does not list the adapter instance among the resources it
+  collects, so a cycle run from `rediscover` never reaches the collect
+  failure path. **Behavior change:** each instance now discovers one object,
+  "VCF Content Factory vSAN Performance Collector" (new kind
+  `VsanPerfCollector` in describe.xml, nameKeys 40 to 42, identifiers
+  `vcenter` and `cluster_scope`), and the whole cycle runs in `collect()` for
+  it, as compliance does for `ComplianceWorld`; a failure is a normal collect
+  failure, mapped to DOWN for an unreachable target with the same
+  credential-free message. The object's identity is the account's own
+  (vCenter Server lower-cased; Clusters to include as normalised items, `*`
+  for all), not the vCenter instance UUID, which needs a login and so is
+  unknown exactly when vCenter is unreachable. The self-metrics stay on the
+  adapter instance (proven on devel 9.0.2): `rediscover` now only hands
+  over the instance resource and never throws. A new instance shows the
+  object, and so the DOWN mapping, from its second cycle. New SDK-free
+  `CycleReport` (self-metrics and last_error to the sink, then throw with
+  the cause). Test: EngineTest `loginFailsCollectThrows` (login fails: the
+  collect path throws a ConnectException-caused failure that maps to DOWN,
+  nothing is read from or pushed to VCF Operations, no perf call, the 11
+  self-metrics and last_error still reported; a healthy cycle does not
+  throw and reports `none`); ConfigTest covers `cluster_scope`. README
+  "Acceptance on each platform" records the 9.0.2 results and the change;
+  the pNIC Metrics-tab rendering check and the collector log scan stay open
+  (they need a logged-in browser and a Cloud Proxy login, which the lab
+  profile lacks).
+
 ## 0.1.0.6 (Unreleased)
 
 - fix(adapter): build 6, two defects from the external (Codex) review of

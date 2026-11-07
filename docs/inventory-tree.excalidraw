@@ -2,7 +2,43 @@
   "type": "excalidraw",
   "version": 2,
   "source": "https://excalidraw.com",
-  "elements": [],
+  "elements": [
+    {
+      "id": "6a5a1d22",
+      "type": "rectangle",
+      "x": 40,
+      "y": 40,
+      "width": 220,
+      "height": 96,
+      "angle": 0,
+      "strokeColor": "#374151",
+      "backgroundColor": "#ffffff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "groupIds": [],
+      "roundness": {
+        "type": 3
+      },
+      "seed": 2849384415,
+      "version": 1,
+      "versionNonce": 1426420085,
+      "isDeleted": false,
+      "boundElements": [],
+      "updated": 1700000000000,
+      "link": null,
+      "locked": false,
+      "label": {
+        "text": "vSAN Performance Collector\n  vcenter *\n  cluster_scope *",
+        "fontSize": 13,
+        "fontFamily": 1,
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    }
+  ],
   "appState": {
     "gridSize": null,
     "viewBackgroundColor": "#ffffff"

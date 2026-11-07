@@ -47,11 +47,11 @@ mismatch, so enter vCenter by a name on its certificate.
 4. After a cycle or two, check the instance's `Collection|*` metrics and a
    host's `vSAN Perf` keys.
 
-Until the platform acceptance in the repo README ("Acceptance on each
-platform") has passed on your VCF Operations version, treat two things as
-unverified: that the `Collection|*` self-metrics appear on the instance,
-and that an unreachable vCenter shows the account DOWN rather than ERROR
-"Resource discovery failed and there was nothing to collect".
+A new instance shows its "VCF Content Factory vSAN Performance Collector"
+object from its second cycle; the collection cycle runs for that object,
+so a failure (an unreachable vCenter: DOWN) shows on the account row from
+then on. Until the platform acceptance in the repo README has passed on
+your VCF Operations version, treat that DOWN mapping as unverified.
 
 ## Troubleshooting
 

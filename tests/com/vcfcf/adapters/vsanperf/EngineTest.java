@@ -28,6 +28,7 @@ public final class EngineTest {
     /** A scriptable vCenter. */
     static final class FakeVc implements CycleEngine.VcenterApi {
         volatile String uuid = VC;
+        volatile IOException loginFailure;
         volatile Inventory inventory;
         volatile IOException inventoryFailure;
         volatile RuntimeException inventoryDefect;
@@ -36,7 +37,8 @@ public final class EngineTest {
         final Map<String, Long> delays = new ConcurrentHashMap<>();
         final Map<String, AtomicInteger> calls = new ConcurrentHashMap<>();
 
-        @Override public String instanceUuid(long t) {
+        @Override public String instanceUuid(long t) throws IOException {
+            if (loginFailure != null) throw loginFailure;
             return uuid;
         }
 
@@ -163,6 +165,7 @@ public final class EngineTest {
         labelLagsWithinEntity();
         capsWithinTimeGroup();
         noStarvationBehindSlowCluster();
+        loginFailsCollectThrows();
         System.out.println("EngineTest: all assertions passed");
     }
 
@@ -525,6 +528,47 @@ public final class EngineTest {
         e.run(in(400));
         T.eq(2, vc.calls("domain-c2", EntityType.HOST_DOMOWNER), "c2 queried again in cycle 3");
         T.eq(3, vc.calls("domain-c1", EntityType.HOST_DOMOWNER), "c1 still gets its turn");
+    }
+
+    /**
+     * Build 7 (devel 9.0.2 DOWN check): login fails, so the collect path
+     * throws; nothing is read from or pushed to VCF Operations; the
+     * self-metrics and last_error still reach the sink first; the thrown
+     * failure carries the ConnectException, so it maps to DOWN; the message
+     * is credential-free.
+     */
+    static void loginFailsCollectThrows() throws Exception {
+        FakeVc vc = labVc();
+        vc.loginFailure = new IOException("Login: ConnectException",
+                new java.net.ConnectException("Connection refused"));
+        FakeOps ops = labOps(vc.inventory);
+        Map<String, Object> got = new LinkedHashMap<>();
+        CycleReport.Sink sink = new CycleReport.Sink() {
+            @Override public void metric(String k, double v) { got.put(k, v); }
+            @Override public void property(String k, String v) { got.put(k, v); }
+        };
+        CycleEngine e = engine(vc, ops, 4, 30_000, new T.RecLog(), "");
+        IOException thrown = T.expect(IOException.class, () -> CycleReport.run(e, in(30_000), sink),
+                "collect throws");
+        T.eq("vCenter login or ServiceInstance read failed: Login: ConnectException",
+                thrown.getMessage(), "message");
+        T.check(Failures.isUnreachable(thrown), "maps to DOWN (cause chain)");
+        T.eq(0, ops.gets.get(), "no Suite API read");
+        T.eq(0, ops.calls.size(), "no push");
+        T.eq(0, vc.calls.size(), "no perf call");
+        T.eq(thrown.getMessage(), got.get(CycleReport.LAST_ERROR), "last_error set");
+        T.eq(12, got.size(), "11 self-metrics and last_error");
+        T.eq(0.0, got.get("Collection|clusters_ok"), "nothing collected");
+        T.check(!thrown.getMessage().contains("svc") && !thrown.getMessage().contains("tok-"),
+                "credential-free");
+
+        // A healthy cycle does not throw and reports last_error none.
+        FakeVc ok = labVc();
+        got.clear();
+        CycleEngine.Result r = CycleReport.run(engine(ok, labOps(ok.inventory), 4, 30_000,
+                new T.RecLog(), ""), in(30_000), sink);
+        T.eq(390, r.seriesPushed, "healthy cycle");
+        T.eq("none", got.get(CycleReport.LAST_ERROR), "last_error none");
     }
 
     /** The 100-host cap applies within a time group: 150 hosts, one time, two calls. */

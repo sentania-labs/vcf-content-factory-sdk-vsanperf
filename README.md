@@ -3,8 +3,9 @@
 A Tier 2 (Java SDK) management pack for VCF Operations. It reads the vSAN
 Performance Service over the vSphere JSON API and puts the numbers on the
 hosts you already have: the vCenter adapter's own VMWARE HostSystem
-objects, as keys under `vSAN Perf`. It creates no objects besides its
-adapter instance.
+objects, as keys under `vSAN Perf`. Besides its adapter instance it creates
+one object, the "VCF Content Factory vSAN Performance Collector" its cycle
+runs for.
 
 Build 1 covers three entity types, 61 keys: DOM owner (38 per host), DOM
 client (6 per host) and vSAN physical NICs (17 per NIC, instanced as
@@ -82,20 +83,34 @@ Install on VCF Operations 8.18, 9.0 and 9.1 (design T5) and check, on each:
 3. One key per group read back on each host, against the same cycle's
    `PERF` log; the Metrics tab shows `vSAN Perf > pNIC > vmnic1` (or note how
    it renders).
+4. The collector's own log has no stack-trace storms or unexpected WARN
+   lines over a few cycles.
 
-**Why both are open.** The whole cycle runs in the collector's
-`rediscover` hook, not in `collect()` for a resource of its own as the
-compliance pack does (it discovers a `ComplianceWorld` object). This pack
-creates no object, and `rediscover` is the one per-cycle hook that receives
-the adapter instance, which the self-metrics go onto. A failed cycle pushes
-the self-metrics, then throws; the framework logs that at WARN with a stack
-trace every failing cycle. If the platform lists the adapter instance among
-the resources it collects, `collect()` rethrows the failure there and the
-account row maps it (DOWN when vCenter is unreachable). If it does not, the
-row shows ERROR "Resource discovery failed and there was nothing to
-collect", never DOWN. No pak in this repo has proven which holds, so check
-2 decides it; if it shows ERROR, the cycle moves to `collect()` on the
-instance resource or the docs drop the DOWN claim.
+**Results so far (devel 9.0.2, build 5).** Check 1 passed: all 12 values
+read back on the instance; 390 series pushed, keys on all 5 hosts at the
+newest bucket, cycle 1.0 s, 5.69 calls/s. Check 2 **failed**: an
+unreachable host showed ERROR "Resource discovery failed and there was
+nothing to collect: IOException: vCenter login or ServiceInstance read
+failed: Login: ConnectException". The platform does not list the adapter
+instance among the resources it collects, so a cycle run from the
+`rediscover` hook (build 5) could never report DOWN.
+
+**Build 7 change.** The cycle now runs in `collect()` for one object the
+pack discovers per instance, "VCF Content Factory vSAN Performance
+Collector" (kind `VsanPerfCollector`), the way the compliance pack runs its
+cycle for `ComplianceWorld`. Its identity is the account's own (vCenter
+Server and Clusters to include), known without a login, so it exists while
+vCenter is unreachable and the failure takes the framework's normal collect
+path (DOWN for an unreachable target, same credential-free message). The
+self-metrics stay on the adapter instance, where check 1 proved them. The
+collector object appears from the second cycle of a new instance (an object
+discovered in a cycle is collected from the next one). Checks 1 and 2 must
+be re-run on build 7, on all three platforms.
+
+**Still open, not runnable from the lab profile:** check 3's Metrics-tab
+rendering of `pNIC:vmnic1` (needs a logged-in browser) and check 4's
+collector log scan (needs a Cloud Proxy login). Neither credential is in
+the lab profile.
 
 ## Open before the first `v*` tag
 
@@ -121,7 +136,8 @@ with it, and this pack's history starts on HostSystem from its first cycle.
 ```
 adapter.yaml, describe.xml, resources/, icons/   pak metadata and descriptor
 src/com/vcfcf/adapters/vsanperf/
-  VsanPerfAdapter.java    SDK glue: configure, Test Connection, the cycle hook
+  VsanPerfAdapter.java    SDK glue: configure, Test Connection, the collector object
+  CycleReport.java        one cycle: self-metrics and last_error first, then the failure
   CycleEngine.java        the collector: inventory, pool, deadline, dedup, push
   VsanJsonClient.java     vSphere JSON API client (session, inventory, QueryPerf)
   Inventory.java          PropertyCollector result parser, cluster vSAN rule
