@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0.22 (Unreleased)
+
+- fix(adapter): build 22 (CI on PR #11, JDK 25 leg). Stop Collecting
+  while a worker was inside a call interrupted it, and its cluster's
+  `TIMED_OUT` report, when it reached the drain after the stop, was counted
+  in `clusters_timed_out` instead of as stopped (`stopIsNotTimeout` failed
+  on a slower runner). A cluster that reports `TIMED_OUT` in the drain after
+  a stop now counts as stopped; deadline cuts are unchanged.
+- test(adapter): no test outcome depends on runner speed. Every engine test
+  (EngineTest, TiersEngineTest, DiskVmEngineTest, DiskVmTest, ScopeTest,
+  the engine case in ClientFakeServerTest) runs on a simulated clock
+  (`T.CLOCK`): a fake call takes 1 ms of simulated time or its fixture
+  delay, never a real sleep, so `deadlineCut`, `noStarvationBehindSlowCluster`
+  and the restart rule decide their cuts from the fixture. The two
+  client-level timeout tests drop their wall-clock upper bounds: the
+  `HttpTimeoutException` alone proves the budget (the server answers with
+  data if the budget is not enforced). New `stopDuringCallIsNotTimeout`
+  stops the cycle while a worker is blocked in a call. Behaviour under test
+  is unchanged.
+
 ## 1.2.0.21 (Unreleased)
 
 - fix(adapter): build 21 (Codex on PR #11). `exclude_types` could not

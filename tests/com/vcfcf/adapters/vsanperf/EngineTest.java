@@ -35,14 +35,7 @@ public final class EngineTest {
         /** (cluster|type) to a body or an exception; missing = empty echo. */
         final Map<String, Object> answers = new ConcurrentHashMap<>();
         final Map<String, Long> delays = new ConcurrentHashMap<>();
-        /**
-         * Build 21: simulated time. A call in {@link #advances} moves
-         * {@link #fakeClock} on by its ms instead of sleeping, so a test that
-         * gives the engine {@code fakeClock::get} decides cuts by the fixture.
-         */
-        final Map<String, Long> advances = new ConcurrentHashMap<>();
-        final java.util.concurrent.atomic.AtomicLong fakeClock =
-                new java.util.concurrent.atomic.AtomicLong(1_000_000L);
+
         final Map<String, AtomicInteger> calls = new ConcurrentHashMap<>();
 
         @Override public String instanceUuid(long t) throws IOException {
@@ -110,11 +103,12 @@ public final class EngineTest {
                 throws IOException, InterruptedException {
             String k = cluster + "|" + type.id;
             order.add(k);
-            Long adv = advances.get(k);
-            if (adv != null) fakeClock.addAndGet(adv);
             calls.computeIfAbsent(k, x -> new AtomicInteger()).incrementAndGet();
+            // Build 22: a call takes simulated time on T.CLOCK, never real
+            // time: 1 ms, or its delay, so whether it crosses a deadline is
+            // the fixture's and a perf phase has a duration on any runner.
             Long d = delays.get(k);
-            if (d != null) Thread.sleep(d);
+            T.CLOCK.addAndGet(d != null ? d : 1L);
             Object a = answers.get(k);
             if (a instanceof IOException) throw (IOException) a;
             if (a instanceof Error) throw (Error) a;
@@ -231,11 +225,11 @@ public final class EngineTest {
     static CycleEngine engine(FakeVc vc, FakeOps ops, int workers, long callMs, T.RecLog log,
             String include) {
         return new CycleEngine(vc, ops, new CycleEngine.Settings(new ClusterFilter(include, ""),
-                workers, callMs, true), log, System::currentTimeMillis);
+                workers, callMs, true), log, T.CLOCK::get);
     }
 
     static long in(long ms) {
-        return System.currentTimeMillis() + ms;
+        return T.in(ms);
     }
 
     public static void main(String[] args) throws Exception {
@@ -251,6 +245,7 @@ public final class EngineTest {
         workerErrors();
         callerDefect();
         stopIsNotTimeout();
+        stopDuringCallIsNotTimeout();
         uncleanPushResends();
         mixedTimestampRows();
         labelLagsWithinEntity();
@@ -383,7 +378,7 @@ public final class EngineTest {
 
         vc = labVc();
         r = new CycleEngine(vc, null, new CycleEngine.Settings(new ClusterFilter("", ""), 4, 30_000,
-                false), new T.RecLog(), System::currentTimeMillis).run(in(30_000));
+                false), new T.RecLog(), T.CLOCK::get).run(in(30_000));
         T.check(r.failure.contains("Suite API"), "no Suite API fails visibly");
 
         vc = labVc();
@@ -425,10 +420,10 @@ public final class EngineTest {
         vc.delays.put("domain-c8|host-domowner", 5_000L);
         FakeOps ops = labOps(vc.inventory);
         T.RecLog log = new T.RecLog();
-        long start = System.currentTimeMillis();
         CycleEngine.Result r = engine(vc, ops, 1, 30_000, log, "").run(in(1_500));
-        long took = System.currentTimeMillis() - start;
-        T.check(took < 4_000, "the deadline ends the cycle (took " + took + " ms)");
+        // Build 22: c8's call moves the simulated clock 5 s, past the 1.5 s
+        // deadline; c9 is picked up after it and never called.
+        T.eq(0, vc.calls("domain-c9", EntityType.HOST_DOMOWNER), "the deadline ends the cycle");
         T.eq(1, r.clustersOk, "completed cluster");
         T.eq(2, r.clustersTimedOut, "running and unstarted clusters timed out");
         T.eq(780, r.seriesPushed, "completed cluster still pushed");
@@ -509,6 +504,35 @@ public final class EngineTest {
             T.check(!log.text().contains("cycle deadline reached"), "no deadline WARN");
             T.check(log.text().contains("stopped=1"), "summary says stopped");
         }
+    }
+
+    /**
+     * Build 22 (the CI flake on PR #11): Stop Collecting while a worker is
+     * inside a call. The stop interrupts it, so its cluster ends TIMED_OUT
+     * after the stop; whether that report reaches the drain or not, the
+     * cluster counts as stopped, never as timed out.
+     */
+    static void stopDuringCallIsNotTimeout() throws Exception {
+        java.util.concurrent.atomic.AtomicBoolean stop = new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.CountDownLatch inCall = new java.util.concurrent.CountDownLatch(1);
+        FakeVc vc = new FakeVc() {
+            @Override public CycleEngine.PerfCall queryPerf(String cluster, EntityType type,
+                    long s, long e, long timeoutMs) throws IOException, InterruptedException {
+                inCall.countDown();
+                stop.set(true);
+                Thread.sleep(60_000); // until the stop interrupts it
+                throw new AssertionError("not interrupted");
+            }
+        };
+        vc.inventory = labInventory();
+        T.RecLog log = new T.RecLog();
+        CycleEngine e = engine(vc, labOps(vc.inventory), 1, 30_000, log, "");
+        e.setStopSignal(stop::get);
+        CycleEngine.Result r = e.run(in(30_000));
+        T.check(inCall.getCount() == 0, "the worker was in a call");
+        T.eq(0, r.clustersTimedOut, "not a timeout");
+        T.eq(1, r.clustersStopped, "stopped");
+        T.check(!log.text().contains("cycle deadline reached"), "no deadline WARN");
     }
 
     /** Review N5: a bucket in a push that was not clean is sent again next cycle. */
@@ -699,16 +723,15 @@ public final class EngineTest {
         // count as started; with one worker the rule is off, so cycle 2
         // continues after c2, at c3.
         FakeVc vc = fiveClusters();
-        vc.advances.put("domain-c2|host-domowner", 5_000L);
+        vc.delays.put("domain-c2|host-domowner", 5_000L);
         FakeOps ops = labOps(vc.inventory);
-        CycleEngine e = new CycleEngine(vc, ops, new CycleEngine.Settings(new ClusterFilter("", ""),
-                1, 30_000, true), new T.RecLog(), vc.fakeClock::get);
-        CycleEngine.Result r1 = e.run(vc.fakeClock.get() + 1_000);
+        CycleEngine e = engine(vc, ops, 1, 30_000, new T.RecLog(), "");
+        CycleEngine.Result r1 = e.run(in(1_000));
         T.eq(1, r1.clustersOk, "c1 done");
         T.eq(1, vc.calls("domain-c2", EntityType.HOST_DOMOWNER), "c2 started, then cut");
         T.eq(0, vc.calls("domain-c3", EntityType.HOST_DOMOWNER), "c3 to c5 never called");
         int mark = vc.order.size();
-        e.run(vc.fakeClock.get() + 1_000);
+        e.run(in(1_000));
         T.eq("domain-c3", firstTwo(vc, mark).get(0), "one worker: cycle 2 starts at c3");
     }
 
@@ -768,7 +791,7 @@ public final class EngineTest {
         FakeVc vc = labVc();
         T.RecLog log = new T.RecLog();
         CycleEngine e = new CycleEngine(vc, labOps(vc.inventory), new CycleEngine.Settings(
-                new ClusterFilter("", ""), 4, 30_000, false), log, System::currentTimeMillis);
+                new ClusterFilter("", ""), 4, 30_000, false), log, T.CLOCK::get);
 
         CycleReport.run(e, in(30_000), null);
         String healthy = log.text();

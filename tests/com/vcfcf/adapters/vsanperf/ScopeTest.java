@@ -193,11 +193,11 @@ public final class ScopeTest {
     static CycleEngine engine(EngineTest.FakeVc vc, EngineTest.FakeOps ops, T.RecLog log,
             EntityType.Scope scope) {
         return new CycleEngine(vc, ops, new CycleEngine.Settings(new ClusterFilter("", ""), 4,
-                30_000, true, types(scope.label), 3, scope), log, System::currentTimeMillis);
+                30_000, true, types(scope.label), 3, scope), log, T.CLOCK::get);
     }
 
     static long in(long ms) {
-        return System.currentTimeMillis() + ms;
+        return T.in(ms);
     }
 
     /**
@@ -417,7 +417,7 @@ public final class ScopeTest {
                 EntityType.REMOTE_VSCSI, EntityType.REMOTE_VIRTUAL_DISK);
         T.RecLog log = new T.RecLog();
         CycleEngine e = new CycleEngine(vc, ops, new CycleEngine.Settings(new ClusterFilter("", ""),
-                4, 30_000, true, types, 1, EntityType.Scope.ALL), log, System::currentTimeMillis);
+                4, 30_000, true, types, 1, EntityType.Scope.ALL), log, T.CLOCK::get);
         CycleEngine.Result r = e.run(in(60_000));
         T.eq(null, r.failure, "cycle ok");
         int vmKeys = 0;
@@ -466,7 +466,7 @@ public final class ScopeTest {
         EngineTest.FakeVc vc = p3Vc();
         CycleEngine e = new CycleEngine(vc, TiersEngineTest.labOps(vc.inventory),
                 new CycleEngine.Settings(new ClusterFilter("", ""), 4, 30_000, false, cfg.types, 3,
-                        cfg.scope), new T.RecLog(), System::currentTimeMillis);
+                        cfg.scope), new T.RecLog(), T.CLOCK::get);
         CycleEngine.Result r = e.run(in(60_000));
         T.eq(54, r.perfCalls, "56 default-tier types under all, two excluded");
         T.eq(0, vc.calls(LAB, EntityType.COMPUTECLUSTER_REMOTEDOMCLIENT), "computeCluster not queried");

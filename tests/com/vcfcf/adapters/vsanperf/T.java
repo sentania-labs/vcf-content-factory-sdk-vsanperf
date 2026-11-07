@@ -11,6 +11,21 @@ final class T {
 
     private T() {}
 
+    /**
+     * Build 22: the simulated clock every engine test runs on. It starts at
+     * the real time (so dedup-mark pruning and learned-type windows see
+     * realistic times) and moves only when a fixture moves it (FakeVc
+     * delays), so no cycle deadline or per-call budget depends on how fast
+     * the runner is.
+     */
+    static final java.util.concurrent.atomic.AtomicLong CLOCK =
+            new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
+
+    /** A deadline {@code ms} after the simulated now. */
+    static long in(long ms) {
+        return CLOCK.get() + ms;
+    }
+
     static void check(boolean cond, String what) {
         if (!cond) throw new AssertionError(what);
     }

@@ -350,6 +350,8 @@ final class CycleEngine {
     private final Set<String> cycleSettled = new HashSet<>();
     /** This cycle's deadline, for {@link #cycleSettled}. */
     private long cycleDeadlineMs;
+    /** Build 22: the drain after Stop Collecting is running (caller thread). */
+    private boolean stopDrain;
     private final Set<String> skipInfoLogged = new HashSet<>();
     private final Set<String> uuidWarned = new HashSet<>();
 
@@ -1013,6 +1015,7 @@ final class CycleEngine {
         Set<Integer> startedBefore = java.util.concurrent.ConcurrentHashMap.newKeySet();
         cycleSettled.clear();
         cycleDeadlineMs = deadlineMs;
+        stopDrain = false;
         final OpsHostMap clusterMap = opsClusters;
         final java.util.concurrent.atomic.AtomicLong vmWaitMax =
                 new java.util.concurrent.atomic.AtomicLong();
@@ -1082,6 +1085,10 @@ final class CycleEngine {
             if (cut || fatal != null || fatalError != null || done.size() < scope.size()) {
                 for (Future<?> f : futures.values()) f.cancel(true);
                 pool.shutdownNow();
+                // Build 22: a cluster that reports TIMED_OUT after Stop
+                // Collecting was interrupted by the stop, not timed out
+                // (review N1 of build 9 held only when the stop won the race).
+                stopDrain = stopped;
                 // What completed before the cut is still pushed.
                 Msg m;
                 while ((m = queue.poll()) != null) {
@@ -1288,7 +1295,10 @@ final class CycleEngine {
         switch (d.outcome) {
             case OK: res.clustersOk++; break;
             case FAILED: res.clustersFailed++; break;
-            default: res.clustersTimedOut++; break;
+            default:
+                if (stopDrain) res.clustersStopped++;
+                else res.clustersTimedOut++;
+                break;
         }
         if (d.warn != null) {
             log.warn("cluster " + d.cluster.moid + " (" + d.cluster.name + "): " + d.warn);

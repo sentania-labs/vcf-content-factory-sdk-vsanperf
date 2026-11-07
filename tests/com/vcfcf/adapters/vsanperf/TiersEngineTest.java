@@ -55,11 +55,11 @@ public final class TiersEngineTest {
     static CycleEngine engine(EngineTest.FakeVc vc, EngineTest.FakeOps ops, T.RecLog log,
             List<EntityType> types) {
         return new CycleEngine(vc, ops, new CycleEngine.Settings(new ClusterFilter("", ""), 4,
-                30_000, true, types), log, System::currentTimeMillis);
+                30_000, true, types), log, T.CLOCK::get);
     }
 
     static long in(long ms) {
-        return System.currentTimeMillis() + ms;
+        return T.in(ms);
     }
 
     static void labDefaultTiers() throws Exception {
