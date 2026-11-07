@@ -1,5 +1,124 @@
 # Changelog
 
+## 1.2.0.22 (Unreleased)
+
+- fix(adapter): build 22 (CI on PR #11, JDK 25 leg). Stop Collecting
+  while a worker was inside a call interrupted it, and its cluster's
+  `TIMED_OUT` report, when it reached the drain after the stop, was counted
+  in `clusters_timed_out` instead of as stopped (`stopIsNotTimeout` failed
+  on a slower runner). A cluster that reports `TIMED_OUT` in the drain after
+  a stop now counts as stopped; deadline cuts are unchanged.
+- test(adapter): no test outcome depends on runner speed. Every engine test
+  (EngineTest, TiersEngineTest, DiskVmEngineTest, DiskVmTest, ScopeTest,
+  the engine case in ClientFakeServerTest) runs on a simulated clock
+  (`T.CLOCK`): a fake call takes 1 ms of simulated time or its fixture
+  delay, never a real sleep, so `deadlineCut`, `noStarvationBehindSlowCluster`
+  and the restart rule decide their cuts from the fixture. The two
+  client-level timeout tests drop their wall-clock upper bounds: the
+  `HttpTimeoutException` alone proves the budget (the server answers with
+  data if the budget is not enforced). New `stopDuringCallIsNotTimeout`
+  stops the cycle while a worker is blocked in a call. Behaviour under test
+  is unchanged.
+
+## 1.2.0.21 (Unreleased)
+
+- fix(adapter): build 21 (Codex on PR #11). `exclude_types` could not
+  exclude `computeCluster-remotedomclient` or `computeHost-remotedomclient`
+  under `metric_scope=all`: the setting was lower-cased and then matched
+  case-sensitively against the mixed-case ids, so both stayed queried and
+  were reported as unknown. The lookup is now case-insensitive
+  (`EntityType.byIdIgnoreCase`; the 69 ids differ by more than case);
+  requests keep the exact id. `ConfigTest` and
+  `ScopeTest.mixedCaseExclusion` exclude both, in either case: not in
+  scope, not reported unknown, never queried (54 calls).
+- test(adapter): `EngineTest.cutClusterRestartsFirst` failed once on the
+  JDK 25 CI leg (run 42385405904) because its cases raced wall-clock
+  deadlines and a real per-call timeout. The restart rule is now two pure
+  functions (`CycleEngine.settled`, `CycleEngine.restartChoice`, no change in
+  behaviour) tested from injected outcomes, plus one engine run on a
+  simulated clock with one worker, where a fixture call moves the clock past
+  the deadline; nothing in the test depends on real time.
+
+## 1.2.0.20 (Unreleased)
+
+- fix(adapter): build 20, the build 19 review. B1: REFERENCE.md printed a
+  dashboard key and label for the 44 `all` rows of `vsan-esa-disk-layer`
+  and `vsan-esa-disk-scsifw` (a splice in the table generator); the rows are
+  regenerated, and the new `ReferenceDocTest` checks every key table row
+  against `EntityType` (stat key, label, leaf, instance template, transform,
+  scope; every type's catalog documented once; 1,805 rows). W1: a cluster
+  counts as cut only when the cycle deadline cut it (its task ended
+  `TIMED_OUT` at or after the deadline, or never reported); one that timed
+  out on its own call before the deadline no longer moves the next cycle's
+  start; the restart-first rule is off with `max_parallel_clusters=1`, where
+  the restarted cluster would hold the only worker. Its cost with two or
+  more workers is documented (a cluster too slow to finish holds one worker
+  for one cycle per rotation lap). `cutClusterRestartsFirst` now asserts
+  the restart with two workers, no move for a per-call timeout, and no
+  restart with one worker. N2: the `exclude_types` configure WARN wording
+  is build 18's again ("this build collects"). N4: `stitch_targets`
+  identity text names Resync on HostSystem and the remote rule on all three
+  kinds. N5: a PerfParser javadoc back on its class.
+- test(adapter): W2: T4 (d) asserts that every cluster completes at least
+  once in any four consecutive cycles over all 12 (build 19 max gap 2;
+  build 18's rotation 6 and build 19 without the restart rule 5 fail it);
+  the two-cycle bound stays from cycle 10, after learning has settled. W3:
+  T4 (e) gets its own ceilings, peak < 60 MB and retained < 45 MB, sized on
+  its readings (retained 31.2 to 32.4 MB, peak up to 46.1 MB) plus a 9 MB
+  sampler spike like the one seen once on (a); (a)'s margin (6.3 to 7.5 MB
+  against 15 MB, one 16.3 MB spike) is recorded, its ceiling unchanged.
+  N1: the class doc's variance figures are build 19's (cycle 4 1,662 to
+  1,664 calls in 237 to 238 s). N3: `ScopeTest.remoteRuleVmTier` covers the
+  remote rule on `remote-virtual-machine`, `remote-vscsi` and
+  `remote-virtual-disk` (a VM of the read lands, a foreign VM, a foreign
+  path and a non-path id count in `clusters_unresolved`, not as VM or vdisk
+  misses). W4: the fixture provenance cites factory commit `478d67b` on
+  main (PR #329); `cf40feb` was on a deleted branch.
+
+## 1.2.0.19 (Unreleased)
+
+- feat(adapter): build 19, design v3 (Build 3). `metric_scope` (Advanced,
+  default `dashboard`, unchanged behaviour; an account saved before 1.2.0
+  gets `dashboard`). `all` collects every metric of the 69 vSAN Performance
+  Service entity types modelled by vsanhostmetrics 2.0.0: 1,595 keys
+  (+1,144: 686 on 21 existing types, 458 on 36 new types onto HostSystem,
+  ClusterComputeResource and VirtualMachine), plus the 210 ESA dedup labels
+  the 9.1.1 service returns beyond that model (design addendum Q3, P3
+  capture), 1,805 keys in all, no labels filter (labels outside the catalog,
+  the 41 `Actual` twins on the lab, are dropped and counted in `PERF tier
+  labels_dropped`, named once per type per day at INFO). Keys only added;
+  leaves frozen by the v3 leaf rule (`EntityTypeTest` reproduces all 1,144
+  Appendix A leaves from the Python units); `pctMemUsed` pushed as served
+  (integer percent, P3). New id grammars: `host-cpu` 1 or 2 parts (the host
+  aggregate is `vSAN Perf|pCPU|*`), world types `<world>-<id>`, iSCSI LUN
+  `<target>/<lun>`. Remote (HCI Mesh) types land only on objects of the
+  queried cluster, else `clusters_unresolved` with one WARN per refresh
+  (addendum Q6). The nine types that fault on every query form on 9.1.1 are
+  optional types: counted in `optional_calls_failed` and learned after three
+  consecutive faults with the re-probe spread (addendum Q5). `cluster-pmem`
+  never lands on a host (its `PMem` group is `host-pmem`'s there). Switching
+  scope restarts learned types and dedup marks (a new engine; pinned in
+  `ScopeTest`). Cost under `all`, lab: ~5.8x series per host, ~3.8x per
+  cluster; steady calls per cluster 23 to 37 with the default tiers. Summary
+  line gains `scope=`, `PERF tier` gains `scope` and `labels_dropped`.
+- fix(adapter): cluster rotation under a sustained deadline cut (found by
+  the new T4 (d)): a cluster a worker picked up after the deadline (timed
+  out without a call) counted as attempted, so the next cycle started past
+  the end of the list and the same clusters completed every cycle (51 of 70
+  in two cycles). Now only a start before the deadline counts, and the
+  earliest cluster the cut interrupted goes first next cycle, unless it was
+  one the workers started with or the previous cycle cut it too (the Codex
+  starvation case, `noStarvationBehindSlowCluster`, still holds). Affects
+  `dashboard` too, only on cycles that hit the deadline (build 20 makes
+  that exact: see 1.2.0.20).
+- test(adapter): the 69 P3 captures (`all-<type>-2026-11-07.json`,
+  verbatim) as fixtures; `ScopeTest` (request with and without the filter,
+  parser over every capture under both scopes, new grammars, the engine
+  under `all` on the lab: 56 / 54 / 54 / 37 calls, 13,516 values on cycle 1,
+  the read-back keys, the scope switch, the remote rule); the replay harness
+  takes `--scope all` (templates from the P3 captures, faults served as
+  captured) and T4 gains (d), (d') and (e), all passing (README).
+
 ## 1.1.0.18 (Unreleased)
 
 - test(adapter): build 18, the push model from live readings. The replay

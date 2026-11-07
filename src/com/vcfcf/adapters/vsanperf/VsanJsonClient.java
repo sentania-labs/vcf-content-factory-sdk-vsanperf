@@ -432,21 +432,34 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
                 + "/vsan/VsanPerformanceManager/vsan-performance-manager/VsanPerfQueryPerf";
     }
 
+    /** The dashboard-scope body (Builds 1 and 2). */
+    static String perfBody(EntityType type, String clusterMoid, long startMs, long endMs) {
+        return perfBody(type, EntityType.Scope.DASHBOARD, clusterMoid, startMs, endMs);
+    }
+
     /**
      * The {@code VsanPerfQueryPerf} body: exactly one wildcard spec with
-     * {@code _typeName}, UTC dates with {@code Z}, the type's labels, no
-     * {@code interval}; the cluster MoRef always present.
+     * {@code _typeName}, UTC dates with {@code Z}, no {@code interval}; the
+     * cluster MoRef always present. Under {@code dashboard} the type's
+     * dashboard labels go as the {@code labels} filter; under {@code all}
+     * there is no {@code labels} key (design v3 C3; P3 body shape).
      */
-    static String perfBody(EntityType type, String clusterMoid, long startMs, long endMs) {
-        StringBuilder labels = new StringBuilder("[");
-        for (String l : type.labels()) {
-            if (labels.length() > 1) labels.append(',');
-            labels.append(Json.quote(l));
+    static String perfBody(EntityType type, EntityType.Scope scope, String clusterMoid,
+            long startMs, long endMs) {
+        java.util.List<String> wanted = type.requestLabels(scope);
+        String labelsField = "";
+        if (wanted != null) {
+            StringBuilder labels = new StringBuilder("[");
+            for (String l : wanted) {
+                if (labels.length() > 1) labels.append(',');
+                labels.append(Json.quote(l));
+            }
+            labels.append(']');
+            labelsField = ",\"labels\":" + labels;
         }
-        labels.append(']');
         return "{\"querySpecs\":[{\"_typeName\":\"VsanPerfQuerySpec\",\"entityRefId\":"
                 + Json.quote(type.id + ":*") + ",\"startTime\":" + Json.quote(utc(startMs))
-                + ",\"endTime\":" + Json.quote(utc(endMs)) + ",\"labels\":" + labels + "}],"
+                + ",\"endTime\":" + Json.quote(utc(endMs)) + labelsField + "}],"
                 + "\"cluster\":{\"_typeName\":\"ManagedObjectReference\","
                 + "\"type\":\"ClusterComputeResource\",\"value\":" + Json.quote(clusterMoid) + "}}";
     }
@@ -459,8 +472,16 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
     @Override
     public CycleEngine.PerfCall queryPerf(String clusterMoid, EntityType type, long startMs,
             long endMs, long timeoutMs) throws IOException, InterruptedException {
+        return queryPerf(clusterMoid, type, EntityType.Scope.DASHBOARD, startMs, endMs,
+                timeoutMs);
+    }
+
+    @Override
+    public CycleEngine.PerfCall queryPerf(String clusterMoid, EntityType type,
+            EntityType.Scope scope, long startMs, long endMs, long timeoutMs)
+            throws IOException, InterruptedException {
         long deadline = deadlineIn(timeoutMs);
-        String body = perfBody(type, clusterMoid, startMs, endMs);
+        String body = perfBody(type, scope, clusterMoid, startMs, endMs);
         return authenticated(deadline, s -> {
             Raw raw = send("POST", perfPath(), body, s.token, deadline,
                     "VsanPerfQueryPerf " + type.id, type.wireCap());
@@ -483,7 +504,7 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
                                 new java.io.ByteArrayInputStream(raw.body.bytes), 8192)
                         : new java.io.ByteArrayInputStream(raw.body.bytes));
                 try (java.io.InputStream in = counted) {
-                    parsed = PerfParser.parse(in, type);
+                    parsed = PerfParser.parse(in, type, scope);
                 }
             } catch (Unreadable u) {
                 throw u;

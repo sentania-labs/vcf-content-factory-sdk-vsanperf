@@ -31,7 +31,7 @@ public final class ConfigTest {
                 "host-domowner,host-domclient,vsan-pnic-net"), "nothing left in scope");
         T.expect(IllegalArgumentException.class, () -> tiers("yes", null, null), "strict flag");
         T.check(d.toString().contains("tierHost=true tierCluster=true tierDisk=false tierVm=false "
-                + "vmEveryN=3 types=26"), "toString");
+                + "vmEveryN=3 scope=dashboard types=26"), "toString");
         // Build 11: the disk and VM tiers, default off; the VM cadence.
         T.check(!d.tierDisk && !d.tierVm, "disk and VM tiers off by default");
         T.eq(3, d.vmEveryN, "VM every 3rd cycle by default");
@@ -48,6 +48,76 @@ public final class ConfigTest {
         T.eq(31, new VsanPerfConfig("vc", "u", "p", "", "", null, null, null, null, null, null,
                 "true", "true", null, "virtual-disk,cache-disk").types.size(),
                 "disk and VM types can be excluded");
+    }
+
+    static VsanPerfConfig scoped(String tierDisk, String tierVm, String exclude, String scope) {
+        return new VsanPerfConfig("vc", "u", "p", "", "", null, null, null, null, null, null,
+                tierDisk, tierVm, null, exclude, scope);
+    }
+
+    /** Build 19 (design v3 "Setting: metric_scope", composition steps 1 to 4). */
+    static void metricScope() {
+        T.eq(EntityType.Scope.DASHBOARD, cfg("vc", null, null, null, null).scope,
+                "an account saved before 1.2.0: dashboard");
+        T.eq(EntityType.Scope.DASHBOARD, scoped(null, null, "", " ").scope, "blank: dashboard");
+        T.eq(EntityType.Scope.ALL, scoped(null, null, "", " ALL ").scope, "any case, trimmed");
+        IllegalArgumentException e = T.expect(IllegalArgumentException.class,
+                () -> scoped(null, null, "", "everything"), "strict enum");
+        T.check(!e.getMessage().contains("everything"), "never echoes the value");
+        // Types per tier under all (v3): core 3, cluster 19, host 34, disk 7, VM 6.
+        T.eq(26, scoped(null, null, "", "dashboard").types.size(), "dashboard default tiers");
+        VsanPerfConfig all = scoped(null, null, "", "all");
+        T.eq(3 + 19 + 34, all.types.size(), "all, default tiers: core 3 + cluster 19 + host 34");
+        T.eq(69, scoped("true", "true", "", "all").types.size(), "all four tiers: 69 types");
+        T.eq(33, scoped("true", "true", "", "dashboard").types.size(), "dashboard: 33 types");
+        VsanPerfConfig coreOnly = new VsanPerfConfig("vc", "u", "p", "", "", null, null, null,
+                null, "false", "false", "false", "false", null, "", "all");
+        T.eq(3, coreOnly.types.size(), "all, every tier off: the three core types only");
+        // C8: within each tier dashboard types first, host-cpu and dom-world-cpu last.
+        int hostCpu = all.types.indexOf(EntityType.HOST_CPU);
+        int world = all.types.indexOf(EntityType.DOM_WORLD_CPU);
+        T.eq(all.types.size() - 2, hostCpu, "host-cpu second to last of the default tiers");
+        T.eq(all.types.size() - 1, world, "dom-world-cpu last");
+        boolean seenNew = false;
+        EntityType.Tier tier = null;
+        for (EntityType t : scoped("true", "true", "", "all").types) {
+            if (t.tier != tier) {
+                tier = t.tier;
+                seenNew = false;
+            }
+            if (t.allOnly) seenNew = true;
+            else T.check(!seenNew, t.id + ": a dashboard type after a new one in its tier");
+        }
+        // exclude_types: any of the 69 under either scope; a new-type id under
+        // dashboard is silent (known, not in scope).
+        VsanPerfConfig ex = scoped(null, null, "dom-world-cpu,host-cpu", "all");
+        T.eq(all.types.size() - 2, ex.types.size(), "the v3 example exclusion");
+        T.check(ex.unknownExcludes.isEmpty(), "known ids");
+        VsanPerfConfig dashEx = scoped(null, null, "dom-world-cpu,host-cpu", "dashboard");
+        T.eq(26, dashEx.types.size(), "nothing to remove under dashboard");
+        T.check(dashEx.unknownExcludes.isEmpty(), "silent under dashboard");
+        T.eq(java.util.List.of("no-such-type"), scoped(null, null, "no-such-type", "all")
+                .unknownExcludes, "an id outside the 69 stays a WARN");
+        T.check(all.toString().contains("scope=all types=56"), "toString: " + all);
+        // Build 21 (Codex on PR #11): the two mixed-case ids can be excluded,
+        // in their own case or any other; neither stays in scope nor is
+        // reported unknown; the exact id is what the request carries.
+        for (String ex2 : new String[] {"computeCluster-remotedomclient,computeHost-remotedomclient",
+                "COMPUTECLUSTER-REMOTEDOMCLIENT, computehost-remotedomclient"}) {
+            VsanPerfConfig mixed = scoped(null, null, ex2, "all");
+            T.check(!mixed.types.contains(EntityType.COMPUTECLUSTER_REMOTEDOMCLIENT)
+                    && !mixed.types.contains(EntityType.COMPUTEHOST_REMOTEDOMCLIENT),
+                    "both mixed-case types excluded: " + ex2);
+            T.eq(all.types.size() - 2, mixed.types.size(), "exactly two removed: " + ex2);
+            T.check(mixed.unknownExcludes.isEmpty(), "not reported unknown: " + mixed.unknownExcludes);
+        }
+        T.check(VsanJsonClient.perfBody(EntityType.COMPUTEHOST_REMOTEDOMCLIENT, EntityType.Scope.ALL,
+                "domain-c1", 0, CycleEngine.WINDOW_MS).contains("\"computeHost-remotedomclient:*\""),
+                "the request keeps the exact id");
+        for (EntityType t : EntityType.values()) {
+            T.eq(t, EntityType.byIdIgnoreCase(t.id.toUpperCase(java.util.Locale.ROOT)),
+                    t.id + ": unambiguous ignoring case");
+        }
     }
 
     static VsanPerfConfig cfg(String host, String workers, String timeout, String deadline,
@@ -105,6 +175,7 @@ public final class ConfigTest {
                 null, null, null, null), "empty password");
 
         tiers();
+        metricScope();
 
         ClusterFilter all = new ClusterFilter("", "");
         T.check(all.accepts("domain-c1", "Prod"), "empty include = all");

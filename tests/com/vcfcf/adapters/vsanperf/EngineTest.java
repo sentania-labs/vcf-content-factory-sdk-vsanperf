@@ -35,6 +35,7 @@ public final class EngineTest {
         /** (cluster|type) to a body or an exception; missing = empty echo. */
         final Map<String, Object> answers = new ConcurrentHashMap<>();
         final Map<String, Long> delays = new ConcurrentHashMap<>();
+
         final Map<String, AtomicInteger> calls = new ConcurrentHashMap<>();
 
         @Override public String instanceUuid(long t) throws IOException {
@@ -81,10 +82,33 @@ public final class EngineTest {
 
         @Override public CycleEngine.PerfCall queryPerf(String cluster, EntityType type, long s,
                 long e, long timeoutMs) throws IOException, InterruptedException {
+            return answer(cluster, type, EntityType.Scope.DASHBOARD);
+        }
+
+        /** Build 19: the scope the engine asked under, per call (dashboard goes through the 5-arg form). */
+        final Map<String, EntityType.Scope> scopes = new ConcurrentHashMap<>();
+
+        @Override public CycleEngine.PerfCall queryPerf(String cluster, EntityType type,
+                EntityType.Scope scope, long s, long e, long timeoutMs)
+                throws IOException, InterruptedException {
+            scopes.put(cluster + "|" + type.id, scope);
+            if (scope == EntityType.Scope.DASHBOARD) return queryPerf(cluster, type, s, e, timeoutMs);
+            return answer(cluster, type, scope);
+        }
+
+        /** Build 20: every call in the order made ("cluster|type"). */
+        final List<String> order = Collections.synchronizedList(new ArrayList<>());
+
+        CycleEngine.PerfCall answer(String cluster, EntityType type, EntityType.Scope scope)
+                throws IOException, InterruptedException {
             String k = cluster + "|" + type.id;
+            order.add(k);
             calls.computeIfAbsent(k, x -> new AtomicInteger()).incrementAndGet();
+            // Build 22: a call takes simulated time on T.CLOCK, never real
+            // time: 1 ms, or its delay, so whether it crosses a deadline is
+            // the fixture's and a perf phase has a duration on any runner.
             Long d = delays.get(k);
-            if (d != null) Thread.sleep(d);
+            T.CLOCK.addAndGet(d != null ? d : 1L);
             Object a = answers.get(k);
             if (a instanceof IOException) throw (IOException) a;
             if (a instanceof Error) throw (Error) a;
@@ -92,8 +116,8 @@ public final class EngineTest {
             if (NULL_RESULT.equals(a)) return new CycleEngine.PerfCall(null, 200, 0, 0);
             String body = a == null ? "[{\"_typeName\":\"VsanPerfEntityMetricCSV\",\"entityRefId\":\""
                     + type.id + ":*\",\"sampleInfo\":\"\"}]" : (String) a;
-            return new CycleEngine.PerfCall(PerfParser.parse(body, type), 200, body.length(),
-                    body.length());
+            return new CycleEngine.PerfCall(PerfParser.parse(body, type, scope), 200,
+                    body.length(), body.length());
         }
 
         int calls(String cluster, EntityType t) {
@@ -201,11 +225,11 @@ public final class EngineTest {
     static CycleEngine engine(FakeVc vc, FakeOps ops, int workers, long callMs, T.RecLog log,
             String include) {
         return new CycleEngine(vc, ops, new CycleEngine.Settings(new ClusterFilter(include, ""),
-                workers, callMs, true), log, System::currentTimeMillis);
+                workers, callMs, true), log, T.CLOCK::get);
     }
 
     static long in(long ms) {
-        return System.currentTimeMillis() + ms;
+        return T.in(ms);
     }
 
     public static void main(String[] args) throws Exception {
@@ -221,12 +245,14 @@ public final class EngineTest {
         workerErrors();
         callerDefect();
         stopIsNotTimeout();
+        stopDuringCallIsNotTimeout();
         uncleanPushResends();
         mixedTimestampRows();
         labelLagsWithinEntity();
         capsWithinTimeGroup();
         failedMiddleBatchOnly();
         noStarvationBehindSlowCluster();
+        cutClusterRestartsFirst();
         loginFailsCollectThrows();
         summaryAndPerfLinesEveryCycle();
         System.out.println("EngineTest: all assertions passed");
@@ -352,7 +378,7 @@ public final class EngineTest {
 
         vc = labVc();
         r = new CycleEngine(vc, null, new CycleEngine.Settings(new ClusterFilter("", ""), 4, 30_000,
-                false), new T.RecLog(), System::currentTimeMillis).run(in(30_000));
+                false), new T.RecLog(), T.CLOCK::get).run(in(30_000));
         T.check(r.failure.contains("Suite API"), "no Suite API fails visibly");
 
         vc = labVc();
@@ -394,10 +420,10 @@ public final class EngineTest {
         vc.delays.put("domain-c8|host-domowner", 5_000L);
         FakeOps ops = labOps(vc.inventory);
         T.RecLog log = new T.RecLog();
-        long start = System.currentTimeMillis();
         CycleEngine.Result r = engine(vc, ops, 1, 30_000, log, "").run(in(1_500));
-        long took = System.currentTimeMillis() - start;
-        T.check(took < 4_000, "the deadline ends the cycle (took " + took + " ms)");
+        // Build 22: c8's call moves the simulated clock 5 s, past the 1.5 s
+        // deadline; c9 is picked up after it and never called.
+        T.eq(0, vc.calls("domain-c9", EntityType.HOST_DOMOWNER), "the deadline ends the cycle");
         T.eq(1, r.clustersOk, "completed cluster");
         T.eq(2, r.clustersTimedOut, "running and unstarted clusters timed out");
         T.eq(780, r.seriesPushed, "completed cluster still pushed");
@@ -478,6 +504,35 @@ public final class EngineTest {
             T.check(!log.text().contains("cycle deadline reached"), "no deadline WARN");
             T.check(log.text().contains("stopped=1"), "summary says stopped");
         }
+    }
+
+    /**
+     * Build 22 (the CI flake on PR #11): Stop Collecting while a worker is
+     * inside a call. The stop interrupts it, so its cluster ends TIMED_OUT
+     * after the stop; whether that report reaches the drain or not, the
+     * cluster counts as stopped, never as timed out.
+     */
+    static void stopDuringCallIsNotTimeout() throws Exception {
+        java.util.concurrent.atomic.AtomicBoolean stop = new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.CountDownLatch inCall = new java.util.concurrent.CountDownLatch(1);
+        FakeVc vc = new FakeVc() {
+            @Override public CycleEngine.PerfCall queryPerf(String cluster, EntityType type,
+                    long s, long e, long timeoutMs) throws IOException, InterruptedException {
+                inCall.countDown();
+                stop.set(true);
+                Thread.sleep(60_000); // until the stop interrupts it
+                throw new AssertionError("not interrupted");
+            }
+        };
+        vc.inventory = labInventory();
+        T.RecLog log = new T.RecLog();
+        CycleEngine e = engine(vc, labOps(vc.inventory), 1, 30_000, log, "");
+        e.setStopSignal(stop::get);
+        CycleEngine.Result r = e.run(in(30_000));
+        T.check(inCall.getCount() == 0, "the worker was in a call");
+        T.eq(0, r.clustersTimedOut, "not a timeout");
+        T.eq(1, r.clustersStopped, "stopped");
+        T.check(!log.text().contains("cycle deadline reached"), "no deadline WARN");
     }
 
     /** Review N5: a bucket in a push that was not clean is sent again next cycle. */
@@ -598,6 +653,94 @@ public final class EngineTest {
         T.eq(3, vc.calls("domain-c1", EntityType.HOST_DOMOWNER), "c1 still gets its turn");
     }
 
+    static FakeVc fiveClusters() {
+        FakeVc vc = new FakeVc();
+        List<Inventory.Cluster> cls = new ArrayList<>();
+        for (String n : new String[] {"1", "2", "3", "4", "5"}) {
+            cls.add(new Inventory.Cluster("domain-c" + n, "c" + n, List.of(new Inventory.Host(
+                    "host-" + n, n, "node-" + n, "U" + n, true))));
+        }
+        vc.inventory = new Inventory(cls);
+        return vc;
+    }
+
+    /** The clusters, in order, whose DOM owner call came first in each cycle's calls from {@code from}. */
+    static List<String> firstTwo(FakeVc vc, int from) {
+        List<String> out = new ArrayList<>();
+        synchronized (vc.order) {
+            for (String k : vc.order.subList(from, vc.order.size())) {
+                if (k.endsWith("|host-domowner")) out.add(k.substring(0, k.indexOf('|')));
+                if (out.size() == 2) break;
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Builds 19 to 21 (design v3 T4 (d), build 19 review W1, PR #11 CI
+     * flake): the restart rule decided from injected outcomes, never from
+     * wall-clock timing. {@link CycleEngine#settled} and
+     * {@link CycleEngine#restartChoice} directly, then one engine run on a
+     * simulated clock with one worker (serial, so the call order is the
+     * fixture's).
+     */
+    static void cutClusterRestartsFirst() throws Exception {
+        long dl = 10_000;
+        T.check(CycleEngine.settled(CycleEngine.Outcome.OK, dl + 5, dl), "OK settles");
+        T.check(CycleEngine.settled(CycleEngine.Outcome.FAILED, dl + 5, dl), "FAILED settles");
+        T.check(CycleEngine.settled(CycleEngine.Outcome.TIMED_OUT, dl - 1, dl),
+                "a per-call timeout before the deadline is not a cut");
+        T.check(!CycleEngine.settled(CycleEngine.Outcome.TIMED_OUT, dl, dl),
+                "TIMED_OUT at the deadline is a cut");
+
+        List<String> order = List.of("c1", "c2", "c3", "c4", "c5");
+        java.util.Set<Integer> started = java.util.Set.of(0, 1, 2, 3, 4);
+        java.util.Set<String> cut = new java.util.HashSet<>();
+        T.eq("c3", CycleEngine.restartChoice(order, started, java.util.Set.of("c1", "c2", "c4",
+                "c5"), java.util.Set.of(), 2, cut), "two workers: the cut c3 goes first");
+        T.eq(java.util.Set.of("c3"), cut, "cutNow");
+        cut.clear();
+        T.eq(null, CycleEngine.restartChoice(order, started, java.util.Set.of("c1", "c2", "c3",
+                "c4", "c5"), java.util.Set.of(), 2, cut),
+                "c3 timed out on its own call (settled): the start does not move");
+        T.check(cut.isEmpty(), "nothing cut");
+        T.eq(null, CycleEngine.restartChoice(order, started, java.util.Set.of("c1", "c2", "c4",
+                "c5"), java.util.Set.of(), 1, cut), "one worker: rule off");
+        cut.clear();
+        T.eq(null, CycleEngine.restartChoice(order, started, java.util.Set.of("c3", "c4", "c5"),
+                java.util.Set.of(), 2, cut), "c1 and c2 cut, but the workers started with them");
+        T.eq(java.util.Set.of("c1", "c2"), cut, "both counted as cut");
+        cut.clear();
+        T.eq("c4", CycleEngine.restartChoice(order, started, java.util.Set.of("c1", "c2", "c5"),
+                java.util.Set.of("c3"), 2, cut), "c3 cut last cycle too: the next cut one");
+        cut.clear();
+        T.eq("c3", CycleEngine.restartChoice(order, java.util.Set.of(0, 1, 2), java.util.Set.of(
+                "c1", "c2"), java.util.Set.of(), 2, cut), "c3 started and cut goes first");
+        T.eq(java.util.Set.of("c3"), cut, "c4 and c5 never started before the deadline: not cut");
+
+        // Engine, simulated clock, one worker: c2's DOM owner call takes the
+        // clock past the deadline. c3 to c5 are picked up after it and do not
+        // count as started; with one worker the rule is off, so cycle 2
+        // continues after c2, at c3.
+        FakeVc vc = fiveClusters();
+        vc.delays.put("domain-c2|host-domowner", 5_000L);
+        FakeOps ops = labOps(vc.inventory);
+        CycleEngine e = engine(vc, ops, 1, 30_000, new T.RecLog(), "");
+        CycleEngine.Result r1 = e.run(in(1_000));
+        T.eq(1, r1.clustersOk, "c1 done");
+        T.eq(1, vc.calls("domain-c2", EntityType.HOST_DOMOWNER), "c2 started, then cut");
+        T.eq(0, vc.calls("domain-c3", EntityType.HOST_DOMOWNER), "c3 to c5 never called");
+        int mark = vc.order.size();
+        e.run(in(1_000));
+        T.eq("domain-c3", firstTwo(vc, mark).get(0), "one worker: cycle 2 starts at c3");
+    }
+
+    static List<String> sorted(List<String> l) {
+        List<String> s = new ArrayList<>(l);
+        Collections.sort(s);
+        return s;
+    }
+
     /**
      * Build 7 (devel 9.0.2 DOWN check): login fails, so the collect path
      * throws; nothing is read from or pushed to VCF Operations; the
@@ -648,7 +791,7 @@ public final class EngineTest {
         FakeVc vc = labVc();
         T.RecLog log = new T.RecLog();
         CycleEngine e = new CycleEngine(vc, labOps(vc.inventory), new CycleEngine.Settings(
-                new ClusterFilter("", ""), 4, 30_000, false), log, System::currentTimeMillis);
+                new ClusterFilter("", ""), 4, 30_000, false), log, T.CLOCK::get);
 
         CycleReport.run(e, in(30_000), null);
         String healthy = log.text();

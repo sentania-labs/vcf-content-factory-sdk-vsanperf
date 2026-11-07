@@ -277,7 +277,7 @@ public final class DiskVmTest {
             CycleEngine e = new CycleEngine(null, null, new CycleEngine.Settings(
                     new ClusterFilter("", ""), 4, 30_000, false,
                     EntityType.ofTiers(java.util.EnumSet.allOf(EntityType.Tier.class)), n),
-                    Log.NONE, System::currentTimeMillis);
+                    Log.NONE, T.CLOCK::get);
             int[] perCycle = new int[n];
             for (int c = 0; c < 70; c++) {
                 String moid = "domain-c" + (6000 + c);

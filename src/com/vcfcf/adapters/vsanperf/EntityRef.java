@@ -16,6 +16,14 @@ package com.vcfcf.adapters.vsanperf;
  * <li>{@code virtual-disk:<datastore path>}: the rest of the id whole, its
  *     leading {@code /} stripped (3 of 148 lab refs carry one); the
  *     instance (bus position) is resolved from the VM device read.
+ * <li>Build 3 ({@code metric_scope=all}, P3 observed 2026-11-07 where marked):
+ *     {@code host-cpu:<node>|cpu-<n>} (instance {@code cpu-<n>}) and the
+ *     1-part host aggregate {@code host-cpu:<node>} (no instance, observed);
+ *     {@code dom-world-cpu:<node>|<world>|<id>} (observed) and
+ *     {@code lsom-world-cpu} (inferred): instance {@code <world>-<id>};
+ *     {@code vsan-iscsi-lun:<node>|<target>|<lun>}: instance
+ *     {@code <target>/<lun>} (inferred); {@code remote-virtual-disk}: a path
+ *     like {@code virtual-disk}, kept whole even when it is not one.
  * </ul>
  * Split on the first {@code :} for the type, then on {@code |}.
  */
@@ -27,7 +35,7 @@ final class EntityRef {
      * instanceUuid; for {@code virtual-disk} the normalized datastore path.
      */
     final String uuid;
-    /** The instance for an instanced type, {@code null} otherwise (and for {@code virtual-disk}). */
+    /** The instance for an instanced type, {@code null} otherwise (and for a path type and the {@code host-cpu} aggregate). */
     final String instance;
     /** The {@code entityRefId} as served (the dedup mark key). */
     final String raw;
@@ -52,18 +60,30 @@ final class EntityRef {
         if (colon <= 0) return null;
         if (!expected.id.equals(ref.substring(0, colon))) return null;
         String id = ref.substring(colon + 1);
-        if (expected.form == EntityType.IdForm.PATH) {
+        if (expected.form.isPath()) {
             String path = id.startsWith("/") ? id.substring(1) : id;
-            if (path.isEmpty() || path.indexOf('|') >= 0) return null;
+            if (path.isEmpty()) return null;
+            if (path.indexOf('|') >= 0 && expected.form == EntityType.IdForm.PATH) return null;
             return new EntityRef(expected, path, null, ref);
         }
         String[] parts = id.split("\\|", -1);
-        if (parts.length != expected.form.parts) return null;
+        EntityType.IdForm form = expected.form;
+        boolean aggregate = form == EntityType.IdForm.ONE_OR_TWO && parts.length == 1;
+        if (parts.length != form.parts && !aggregate) return null;
         for (String p : parts) {
             if (p.isEmpty()) return null;
         }
-        int ip = expected.form.instancePart;
-        return new EntityRef(expected, parts[0], ip < 0 ? null : parts[ip], ref);
+        if (aggregate) return new EntityRef(expected, parts[0], null, ref);
+        String instance;
+        if (form == EntityType.IdForm.WORLD) {
+            instance = parts[1] + "-" + parts[2];
+        } else if (form == EntityType.IdForm.LUN) {
+            instance = parts[1] + "/" + parts[2];
+        } else {
+            int ip = form.instancePart;
+            instance = ip < 0 ? null : parts[ip];
+        }
+        return new EntityRef(expected, parts[0], instance, ref);
     }
 
     /** The number of {@code |} parts of an id that did not parse (for a WARN, never the id). */

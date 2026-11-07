@@ -13,7 +13,8 @@
   a pak cannot declare keys for VMWARE kinds, and pushed keys carry no label
   or unit (the unit is in the key leaf instead). Key reference: REFERENCE.md.
   Design: factory knowledge/designs/vsanperf-mp-v1.md and, from build 10,
-  vsanperf-mp-v2.md (host, cluster, disk and VM tiers).
+  vsanperf-mp-v2.md (host, cluster, disk and VM tiers); from build 19,
+  vsanperf-mp-v3.md (metric_scope).
 
   Identity: vcenter_host and cluster_include (identType 1), so shard
   instances against one vCenter are distinct accounts (design Q3).
@@ -95,6 +96,17 @@
 			</ResourceIdentifier>
 			<ResourceIdentifier key="vm_tier_every_n_cycles" nameKey="18" type="string"
 			                    required="false" dispOrder="13" default="3" identType="2"/>
+			<!-- Build 19 (design v3 "Setting: metric_scope"): dashboard (the
+			     451 keys the Python pack's views use, unchanged behaviour) or
+			     all (every catalog key of the 69 entity types, no labels
+			     filter). An account saved before 1.2.0 has no stored value and
+			     gets dashboard. identType 2: not part of identity. -->
+			<ResourceIdentifier key="metric_scope" nameKey="43" type="string"
+			                    required="false" dispOrder="14" default="dashboard" identType="2"
+			                    enum="true">
+				<enum value="dashboard" displayOrder="1"/>
+				<enum value="all" displayOrder="2"/>
+			</ResourceIdentifier>
 
 			<!-- Self-metrics (design Q4), delivered in the collect result. -->
 			<ResourceGroup key="Collection" nameKey="20" instanced="false">

@@ -8,7 +8,8 @@
 #
 # Design: factory knowledge/designs/vsanperf-mp-v1.md (Build 1) and
 # vsanperf-mp-v2.md (Build 2: host and cluster tiers from build 10, disk and
-# VM tiers from build 11).
+# VM tiers from build 11) and vsanperf-mp-v3.md (Build 3: metric_scope, build
+# 19, version 1.2.0).
 adapter_kind: vcfcf_vsanperf
 entry_class: com.vcfcf.adapters.vsanperf.VsanPerfAdapter
 name: VCF Content Factory vSAN Performance
@@ -18,11 +19,14 @@ description: >
   read over the vSphere JSON API (one wildcard query per entity type per
   cluster, a bounded pool across clusters) and stitched onto the vCenter
   adapter's own VMWARE HostSystem, ClusterComputeResource and
-  VirtualMachine objects as keys under "vSAN Perf". Creates no objects besides its adapter instance.
+  VirtualMachine objects as keys under "vSAN Perf". Metric scope: dashboard
+  (default, the 451 keys the Python pack's views use) or all (every metric
+  of the 69 vSAN Performance Service entity types, 1,805 keys, no labels
+  filter). Creates no objects besides its adapter instance.
   Replaces the Python vsanhostmetrics pack at scale; distinct adapter kind,
   so the two run side by side.
-version: "1.1.0"
-build_number: 18
+version: "1.2.0"
+build_number: 22
 tier: 2
 released: false
 
@@ -30,12 +34,14 @@ released: false
 # "Metrics Pushed Onto" in docs/. Documentation only; the groups are the
 # exact prefixes REFERENCE.md lists. vSAN Direct Cluster, File Service and
 # IOInsight are decided per entity (cluster uuid: the cluster; one node uuid
-# of that cluster: that host, same group name), so they are listed on both.
+# of that cluster: that host, same group name), so they are listed on both;
+# so is Resync (build 19). PMem and Remote DOM Client exist on both kinds as
+# separate types (cluster total, per host); cluster-pmem never lands on a host.
 stitch_targets:
   - adapter_kind: VMWARE
     resource_kind: HostSystem
-    identity: "VMEntityObjectID (host MoRef, from the vSAN node uuid; disk tier: from the per-host QueryDisksForVsan map) + VMEntityVCID (vCenter about.instanceUuid). vSAN Direct Cluster, File Service and IOInsight land on a host only when the entity id is one node uuid of the queried cluster (runtime landing); otherwise on the cluster"
-    instanced_by: "<vmnic> = vSAN physical NIC; <stack> = TCP/IP stack; <vmk> = vSAN VMkernel NIC; <disk uuid> = vSAN disk uuid (disk tier)"
+    identity: "VMEntityObjectID (host MoRef, from the vSAN node uuid; disk tier: from the per-host QueryDisksForVsan map) + VMEntityVCID (vCenter about.instanceUuid). vSAN Direct Cluster, File Service, IOInsight and (metric_scope=all) Resync land on a host only when the entity id is one node uuid of the queried cluster (runtime landing); otherwise on the cluster. Remote (HCI Mesh) types land only on a host of the queried cluster, never on another cluster's host; other ids are counted in clusters_unresolved"
+    instanced_by: "<vmnic> = vSAN physical NIC; <stack> = TCP/IP stack; <vmk> = vSAN VMkernel NIC; <disk uuid> = vSAN disk uuid (disk tier); metric_scope=all: <cpu> = physical CPU (cpu-<n>; vSAN Perf|pCPU|* is the host aggregate), <world>-<id> = DOM or LSOM world (changes on a host reboot), <heap> = heap name, <slab> = slab name, <target> = iSCSI target IQN, <target>/<lun> = iSCSI LUN"
     key_groups:
       - "vSAN Perf|DOM Owner|*"
       - "vSAN Perf|DOM Client|*"
@@ -60,9 +66,36 @@ stitch_targets:
       - "vSAN Perf|vSAN Direct Cluster|*"
       - "vSAN Perf|File Service|*"
       - "vSAN Perf|IOInsight|*"
+      # metric_scope=all only (build 19; REFERENCE.md carries the scope per key)
+      - "vSAN Perf|ESA Dedup DOM Comp Mgr|*"
+      - "vSAN Perf|ESA Dedup DOM Owner|*"
+      - "vSAN Perf|ESA Dedup Chunk Service|*"
+      - "vSAN Perf|ESA Dedup Hash Service|*"
+      - "vSAN Perf|vSAN Sparse|*"
+      - "vSAN Perf|RDT Network|*"
+      - "vSAN Perf|System Memory|*"
+      - "vSAN Perf|LSOM World:<world>-<id>|*"
+      - "vSAN Perf|Heap:<heap>|*"
+      - "vSAN Perf|Slab:<slab>|*"
+      - "vSAN Perf|CLOM|*"
+      - "vSAN Perf|CMMDS Workload|*"
+      - "vSAN Perf|Distribution|*"
+      - "vSAN Perf|PMem|*"
+      - "vSAN Perf|Remote DOM Client|*"
+      - "vSAN Perf|Compute Remote DOM Client|*"
+      - "vSAN Perf|iSCSI|*"
+      - "vSAN Perf|iSCSI Target:<target>|*"
+      - "vSAN Perf|iSCSI LUN:<target>/<lun>|*"
+      - "vSAN Perf|pCPU|*"
+      - "vSAN Perf|pCPU:<cpu>|*"
+      - "vSAN Perf|DOM World:<world>-<id>|*"
+      - "vSAN Perf|Disk Group:<disk uuid>|*"
+      - "vSAN Perf|CLOM Disk:<disk uuid>|*"
+      - "vSAN Perf|Disk Health:<disk uuid>|*"
+      - "vSAN Perf|Resync|*"
   - adapter_kind: VMWARE
     resource_kind: ClusterComputeResource
-    identity: "VMEntityObjectID (cluster MoRef; the entity id must be that cluster's vSAN uuid) + VMEntityVCID (vCenter about.instanceUuid)"
+    identity: "VMEntityObjectID (cluster MoRef; the entity id must be that cluster's vSAN uuid, remote HCI Mesh types included) + VMEntityVCID (vCenter about.instanceUuid)"
     key_groups:
       - "vSAN Perf|Capacity|*"
       - "vSAN Perf|DOM Client|*"
@@ -74,11 +107,25 @@ stitch_targets:
       - "vSAN Perf|vSAN Direct Cluster|*"
       - "vSAN Perf|File Service|*"
       - "vSAN Perf|IOInsight|*"
+      # metric_scope=all only (build 19)
+      - "vSAN Perf|ESA Dedup DOM Comp Mgr|*"
+      - "vSAN Perf|ESA Dedup DOM Owner|*"
+      - "vSAN Perf|ESA Dedup Chunk Service|*"
+      - "vSAN Perf|ESA Dedup Hash Service|*"
+      - "vSAN Perf|Data Protection|*"
+      - "vSAN Perf|Resync|*"
+      - "vSAN Perf|PMem|*"
+      - "vSAN Perf|Remote DOM Client|*"
+      - "vSAN Perf|Compute Remote DOM Client|*"
   - adapter_kind: VMWARE
     resource_kind: VirtualMachine
-    identity: "VMEntityObjectID (VM MoRef, from config.instanceUuid in the cluster's VM read) + VMEntityVCID (vCenter about.instanceUuid)"
+    identity: "VMEntityObjectID (VM MoRef, from config.instanceUuid in the cluster's VM read; remote HCI Mesh types only for VMs and disks of that read) + VMEntityVCID (vCenter about.instanceUuid)"
     instanced_by: "<busN:M> = the virtual disk's bus position from the VM device list (scsi0:0); <scsiN:M> = the virtual SCSI device"
     key_groups:
       - "vSAN Perf|VM|*"
       - "vSAN Perf|Virtual Disk:<busN:M>|*"
       - "vSAN Perf|vSCSI:<scsiN:M>|*"
+      # metric_scope=all only (build 19)
+      - "vSAN Perf|Remote VM|*"
+      - "vSAN Perf|Remote Virtual Disk:<busN:M>|*"
+      - "vSAN Perf|Remote vSCSI:<scsiN:M>|*"

@@ -16,7 +16,31 @@ public final class LearnedTypesTest {
 
     static final long H = 60L * 60 * 1000;
 
+    /** Build 19, design v3 Q5: the nine strike types learn after three consecutive faults. */
+    static void strikes() {
+        LearnedTypes l = new LearnedTypes();
+        String c = "domain-c6004";
+        EntityType t = EntityType.CMMDS_WORKLOAD;
+        long now = 1_000_000_000_000L;
+        T.check(!l.strike(c, t, now) && !l.strike(c, t, now), "two faults: counted only");
+        T.eq(2, l.strikes(c, t), "two in a row");
+        l.noStrike(c, t);
+        T.eq(0, l.strikes(c, t), "any other answer starts over");
+        T.check(!l.strike(c, t, now) && !l.strike(c, t, now), "two again");
+        T.check(!l.skip(c, t, now), "not skipped before learning");
+        T.check(l.strike(c, t, now), "the third in a row learns it");
+        T.check(l.skip(c, t, now + 1), "skipped");
+        long until = now + LearnedTypes.SKIP_MS + LearnedTypes.offsetMs(c, t);
+        T.check(l.skip(c, t, until - 1), "for 24 h plus the spread offset");
+        T.check(!l.skip(c, t, until), "re-probed after");
+        T.check(l.strike(c, t, until), "a re-probe that faults re-learns at once");
+        T.eq(0, l.streak(c, t), "the empty count is separate");
+        l.clear();
+        T.eq(0, l.strikes(c, t), "clear (a new engine) forgets strikes");
+    }
+
     public static void main(String[] args) {
+        strikes();
         LearnedTypes l = new LearnedTypes();
         String c = "domain-c6004";
         EntityType t = EntityType.VSAN_DIRECT_HOST;

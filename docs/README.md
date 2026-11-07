@@ -22,8 +22,8 @@ This pak pushes keys onto resource kinds owned by other management packs, throug
 
 ### HostSystem (VMWARE)
 
-- **Matched on:** VMEntityObjectID (host MoRef, from the vSAN node uuid; disk tier: from the per-host QueryDisksForVsan map) + VMEntityVCID (vCenter about.instanceUuid). vSAN Direct Cluster, File Service and IOInsight land on a host only when the entity id is one node uuid of the queried cluster (runtime landing); otherwise on the cluster
-- **Instanced by:** \<vmnic\> = vSAN physical NIC; \<stack\> = TCP/IP stack; \<vmk\> = vSAN VMkernel NIC; \<disk uuid\> = vSAN disk uuid (disk tier)
+- **Matched on:** VMEntityObjectID (host MoRef, from the vSAN node uuid; disk tier: from the per-host QueryDisksForVsan map) + VMEntityVCID (vCenter about.instanceUuid). vSAN Direct Cluster, File Service, IOInsight and (metric\_scope=all) Resync land on a host only when the entity id is one node uuid of the queried cluster (runtime landing); otherwise on the cluster. Remote (HCI Mesh) types land only on a host of the queried cluster, never on another cluster's host; other ids are counted in clusters\_unresolved
+- **Instanced by:** \<vmnic\> = vSAN physical NIC; \<stack\> = TCP/IP stack; \<vmk\> = vSAN VMkernel NIC; \<disk uuid\> = vSAN disk uuid (disk tier); metric\_scope=all: \<cpu\> = physical CPU (cpu-\<n\>; vSAN Perf|pCPU|\* is the host aggregate), \<world\>-\<id\> = DOM or LSOM world (changes on a host reboot), \<heap\> = heap name, \<slab\> = slab name, \<target\> = iSCSI target IQN, \<target\>/\<lun\> = iSCSI LUN
 
 | Key group |
 |-----------|
@@ -50,10 +50,36 @@ This pak pushes keys onto resource kinds owned by other management packs, throug
 | `vSAN Perf\|vSAN Direct Cluster\|*` |
 | `vSAN Perf\|File Service\|*` |
 | `vSAN Perf\|IOInsight\|*` |
+| `vSAN Perf\|ESA Dedup DOM Comp Mgr\|*` |
+| `vSAN Perf\|ESA Dedup DOM Owner\|*` |
+| `vSAN Perf\|ESA Dedup Chunk Service\|*` |
+| `vSAN Perf\|ESA Dedup Hash Service\|*` |
+| `vSAN Perf\|vSAN Sparse\|*` |
+| `vSAN Perf\|RDT Network\|*` |
+| `vSAN Perf\|System Memory\|*` |
+| `vSAN Perf\|LSOM World:<world>-<id>\|*` |
+| `vSAN Perf\|Heap:<heap>\|*` |
+| `vSAN Perf\|Slab:<slab>\|*` |
+| `vSAN Perf\|CLOM\|*` |
+| `vSAN Perf\|CMMDS Workload\|*` |
+| `vSAN Perf\|Distribution\|*` |
+| `vSAN Perf\|PMem\|*` |
+| `vSAN Perf\|Remote DOM Client\|*` |
+| `vSAN Perf\|Compute Remote DOM Client\|*` |
+| `vSAN Perf\|iSCSI\|*` |
+| `vSAN Perf\|iSCSI Target:<target>\|*` |
+| `vSAN Perf\|iSCSI LUN:<target>/<lun>\|*` |
+| `vSAN Perf\|pCPU\|*` |
+| `vSAN Perf\|pCPU:<cpu>\|*` |
+| `vSAN Perf\|DOM World:<world>-<id>\|*` |
+| `vSAN Perf\|Disk Group:<disk uuid>\|*` |
+| `vSAN Perf\|CLOM Disk:<disk uuid>\|*` |
+| `vSAN Perf\|Disk Health:<disk uuid>\|*` |
+| `vSAN Perf\|Resync\|*` |
 
 ### ClusterComputeResource (VMWARE)
 
-- **Matched on:** VMEntityObjectID (cluster MoRef; the entity id must be that cluster's vSAN uuid) + VMEntityVCID (vCenter about.instanceUuid)
+- **Matched on:** VMEntityObjectID (cluster MoRef; the entity id must be that cluster's vSAN uuid, remote HCI Mesh types included) + VMEntityVCID (vCenter about.instanceUuid)
 
 | Key group |
 |-----------|
@@ -67,10 +93,19 @@ This pak pushes keys onto resource kinds owned by other management packs, throug
 | `vSAN Perf\|vSAN Direct Cluster\|*` |
 | `vSAN Perf\|File Service\|*` |
 | `vSAN Perf\|IOInsight\|*` |
+| `vSAN Perf\|ESA Dedup DOM Comp Mgr\|*` |
+| `vSAN Perf\|ESA Dedup DOM Owner\|*` |
+| `vSAN Perf\|ESA Dedup Chunk Service\|*` |
+| `vSAN Perf\|ESA Dedup Hash Service\|*` |
+| `vSAN Perf\|Data Protection\|*` |
+| `vSAN Perf\|Resync\|*` |
+| `vSAN Perf\|PMem\|*` |
+| `vSAN Perf\|Remote DOM Client\|*` |
+| `vSAN Perf\|Compute Remote DOM Client\|*` |
 
 ### VirtualMachine (VMWARE)
 
-- **Matched on:** VMEntityObjectID (VM MoRef, from config.instanceUuid in the cluster's VM read) + VMEntityVCID (vCenter about.instanceUuid)
+- **Matched on:** VMEntityObjectID (VM MoRef, from config.instanceUuid in the cluster's VM read; remote HCI Mesh types only for VMs and disks of that read) + VMEntityVCID (vCenter about.instanceUuid)
 - **Instanced by:** \<busN:M\> = the virtual disk's bus position from the VM device list (scsi0:0); \<scsiN:M\> = the virtual SCSI device
 
 | Key group |
@@ -78,11 +113,14 @@ This pak pushes keys onto resource kinds owned by other management packs, throug
 | `vSAN Perf\|VM\|*` |
 | `vSAN Perf\|Virtual Disk:<busN:M>\|*` |
 | `vSAN Perf\|vSCSI:<scsiN:M>\|*` |
+| `vSAN Perf\|Remote VM\|*` |
+| `vSAN Perf\|Remote Virtual Disk:<busN:M>\|*` |
+| `vSAN Perf\|Remote vSCSI:<scsiN:M>\|*` |
 
 ## Quick Reference
 
 - **Adapter kind:** `vcfcf_vsanperf`
-- **Version:** 0.0.0.18
+- **Version:** 0.0.0.22
 - **Traversal spec:** (none)
 - **Resource kinds:** 1
 - **Metrics pushed onto:** HostSystem (VMWARE), ClusterComputeResource (VMWARE), VirtualMachine (VMWARE) (see [Metrics Pushed Onto](#metrics-pushed-onto))

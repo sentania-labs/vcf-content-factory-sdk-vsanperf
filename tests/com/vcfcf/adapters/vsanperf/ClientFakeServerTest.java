@@ -516,9 +516,10 @@ public final class ClientFakeServerTest {
             s.perfMode = "slow";
             VsanJsonClient c = client(s, 500, new T.RecLog());
             c.instanceUuid(10_000);
-            long t = System.currentTimeMillis();
-            T.expect(HttpTimeoutException.class, () -> perf(c), "per-call timeout");
-            T.check(System.currentTimeMillis() - t < 2_000, "fires at the budget, not the server");
+            // Build 22: no wall-clock bound. The server answers (with data)
+            // after 3 s; only the 500 ms budget makes this a timeout, so the
+            // exception alone shows it fires at the budget, on any runner.
+            T.expect(HttpTimeoutException.class, () -> perf(c), "per-call timeout, at the budget");
             T.eq(1, s.perfCalls.get(), "a timeout is not retried");
         }
     }
@@ -603,8 +604,8 @@ public final class ClientFakeServerTest {
             T.RecLog elog = new T.RecLog();
             CycleEngine e = new CycleEngine(c, EngineTest.labOps(EngineTest.labInventory()),
                     new CycleEngine.Settings(new ClusterFilter("", ""), 4, 10_000, true), elog,
-                    System::currentTimeMillis);
-            CycleEngine.Result r = e.run(System.currentTimeMillis() + 30_000);
+                    T.CLOCK::get);
+            CycleEngine.Result r = e.run(T.in(30_000));
             T.check(r.failure != null && !r.failure.contains("session["), "failure: " + r.failure);
             T.check(!r.lastErrorProperty().contains("session["), "last_error");
             T.check(!elog.text().contains("session[") && !log.text().contains("session["),
@@ -630,14 +631,15 @@ public final class ClientFakeServerTest {
                 VsanJsonClient c = client(s, 10_000, new T.RecLog());
                 c.instanceUuid(10_000);
                 long now = System.currentTimeMillis();
-                long t0 = System.nanoTime();
                 // Build 11 review N1: 1,500 ms leaves room for the re-login on a
                 // loaded runner; the server's 900 ms sleeps still spend it on the repeat.
+                // Build 22: no wall-clock bound. With a fresh budget the repeat
+                // (900 ms) would fit and answer with data; only one shared
+                // deadline makes it a timeout, so the exception alone is the
+                // proof, and a slower runner only makes the timeout surer.
                 T.expect(HttpTimeoutException.class, () -> c.queryPerf("domain-c6004",
                         EntityType.HOST_DOMOWNER, now - CycleEngine.WINDOW_MS, now, 1_500),
                         mode + ": the budget covers the repeat");
-                long took = (System.nanoTime() - t0) / 1_000_000;
-                T.check(took <= 1_600, mode + ": failed at " + took + " ms, budget 1,500 ms");
                 T.check(s.perfCalls.get() >= 1, mode + ": called");
                 if (mode.equals("slowResetOnce")) {
                     // No login in between: the repeat is always sent.

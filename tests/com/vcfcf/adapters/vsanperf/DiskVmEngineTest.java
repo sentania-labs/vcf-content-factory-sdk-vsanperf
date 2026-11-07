@@ -93,7 +93,7 @@ public final class DiskVmEngineTest {
     static CycleEngine engine(EngineTest.FakeVc vc, EngineTest.FakeOps ops, T.RecLog log,
             List<EntityType> types, int n, int workers) {
         return new CycleEngine(vc, ops, new CycleEngine.Settings(new ClusterFilter("", ""),
-                workers, 30_000, true, types, n), log, System::currentTimeMillis);
+                workers, 30_000, true, types, n), log, T.CLOCK::get);
     }
 
     static List<EntityType> allTypes() {
@@ -102,7 +102,7 @@ public final class DiskVmEngineTest {
     }
 
     static long in(long ms) {
-        return System.currentTimeMillis() + ms;
+        return T.in(ms);
     }
 
     static void allTiersOnTheLab() throws Exception {
