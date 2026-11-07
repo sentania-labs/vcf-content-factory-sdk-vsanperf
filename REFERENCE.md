@@ -1,6 +1,6 @@
 # VCF Content Factory vSAN Performance: Reference
 
-Build 0.1.0.6 (Build 1 of the design). Design: the factory's
+Build 0.1.0.7 (Build 1 of the design). Design: the factory's
 `knowledge/designs/vsanperf-mp-v1.md`.
 
 ## Adapter
@@ -10,7 +10,7 @@ Build 0.1.0.6 (Build 1 of the design). Design: the factory's
 | Adapter kind | `vcfcf_vsanperf` |
 | Tier | 2 (Java SDK) |
 | Monitoring interval | 5 minutes (the Performance Service's native 300 s bucket) |
-| Objects created | the adapter instance only |
+| Objects created | the adapter instance, and one "VCF Content Factory vSAN Performance Collector" (`VsanPerfCollector`, identifiers `vcenter` and `cluster_scope`) per instance, which the cycle runs for |
 | License required | No |
 
 ### Credentials (`vcenter_credentials`)
@@ -170,6 +170,7 @@ it embeds the vCenter session key) is never logged by this pack, a fault on
 the view is passed on with fixed text only, and every vSphere fault text is
 scrubbed of view ids before it is used.
 
-The framework logs a failed cycle once per cycle at WARN as `rediscovery
-failed (non-fatal)` with the stack trace (the cycle runs in that hook; see
-README "Acceptance on each platform").
+A failed cycle is a failed collect of the collector object: the framework
+logs it at WARN (stack trace on the first failure of a streak, one line
+after), the object shows NO_DATA_RECEIVING and the account row DOWN (vCenter
+unreachable) or ERROR, with the same credential-free message.

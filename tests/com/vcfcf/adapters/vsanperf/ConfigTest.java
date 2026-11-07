@@ -28,6 +28,9 @@ public final class ConfigTest {
         T.eq("https://vc:9443/", VsanPerfConfig.rootUrl("vc:9443"), "check url port");
         T.eq(null, VsanPerfConfig.rootUrl("https://x/"), "invalid check url");
         T.check(!d.toString().contains("s3cret"), "toString has no password");
+        T.eq("*", d.clusterScope(), "collector scope: every cluster");
+        T.eq("Prod,domain-c9", new VsanPerfConfig("vc", "u", "p", " Prod , domain-c9,Prod ", "",
+                null, null, null, null).clusterScope(), "collector scope: normalised items");
         T.check(!d.toString().contains("svc@"), "toString has no principal");
 
         for (String bad : new String[] {"", "https://vc", "u:pw@vc", "vc/path", "vc:0", "vc:x",

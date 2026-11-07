@@ -3,4 +3,5 @@
 adapter_kind_icon: adapter_instance.svg
 
 resource_kinds:
-  vcfcf_vsanperf: adapter_instance.svg   # adapter instance (type=7), the only kind
+  vcfcf_vsanperf: adapter_instance.svg      # adapter instance (type=7)
+  VsanPerfCollector: adapter_instance.svg   # the per-instance collector object (build 7)

@@ -12,7 +12,8 @@ objects, under `vSAN Perf|...`. Key list: [REFERENCE.md](../REFERENCE.md).
 
 | Kind | Notes |
 |---|---|
-| vSAN Performance Adapter Instance (`vcfcf_vsanperf`) | the only object the pack creates; carries the `Collection|*` self-metrics |
+| vSAN Performance Adapter Instance (`vcfcf_vsanperf`) | carries the `Collection|*` self-metrics |
+| VCF Content Factory vSAN Performance Collector (`VsanPerfCollector`) | one per instance (identity: vCenter Server, Clusters to include); the cycle runs for it, so a failed cycle reaches the account row (DOWN when vCenter is unreachable); no metrics of its own |
 
 ### Metrics scope
 
@@ -47,8 +48,10 @@ label or unit: the unit is in the key name.
   verified on each platform before the first release.
 - The Performance Service's sustained call ceiling (per vCenter or per
   cluster) is not yet measured; the `PERF` log lines are how to read it.
-- Not yet verified on a platform: self-metrics on the instance, and DOWN
-  (not ERROR) on the account row for an unreachable vCenter (the cycle runs
-  in the `rediscover` hook; README "Acceptance on each platform").
+- Self-metrics on the instance are proven on devel 9.0.2 (build 5). DOWN
+  for an unreachable vCenter failed there in build 5 and is fixed in build 7
+  (the cycle runs for the collector object); it must be re-checked on all
+  three platforms, along with the pNIC Metrics-tab rendering and a collector
+  log scan (README "Acceptance on each platform").
 - Design T3 (replay harness) and T4 (65 MB heap gate at 70 clusters) are
   not built; the scale claim is unverified until they are.

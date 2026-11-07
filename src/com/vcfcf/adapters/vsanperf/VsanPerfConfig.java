@@ -76,6 +76,16 @@ final class VsanPerfConfig {
         return baseUrl;
     }
 
+    /**
+     * The collector object's {@code cluster_scope} identifier: the include
+     * list as normalised items ({@code a,b}), or {@code *} for every cluster.
+     * Never empty, so the identifier always has a value.
+     */
+    String clusterScope() {
+        java.util.List<String> items = ClusterFilter.items(clusterInclude);
+        return items.isEmpty() ? "*" : String.join(",", items);
+    }
+
     ClusterFilter filter() {
         return new ClusterFilter(clusterInclude, clusterExclude);
     }
