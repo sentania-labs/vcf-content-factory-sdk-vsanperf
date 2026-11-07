@@ -196,6 +196,21 @@ public final class ClientFakeServerTest {
                         while (b.length() < 5 * 1024 * 1024) b.append("{\"x\":\"0123456789\"},");
                         send(ex, 200, b.append("{}]").toString(), false);
                         return;
+                    case "slowNotAuthOnce":
+                        Thread.sleep(350);
+                        if (n == 1) {
+                            valid.remove(sid);
+                            fault(ex, "NotAuthenticated", "The session is not authenticated.");
+                            return;
+                        }
+                        break;
+                    case "slowResetOnce":
+                        Thread.sleep(350);
+                        if (n == 1) {
+                            ex.close();
+                            return;
+                        }
+                        break;
                     case "junk":
                         send(ex, 200, "<html>maintenance</html>", false);
                         return;
@@ -271,6 +286,7 @@ public final class ClientFakeServerTest {
         transportRetry();
         viewIdNeverLeaks();
         unreadableNotRetried();
+        oneDeadlineAcrossRetries();
         System.out.println("ClientFakeServerTest: all assertions passed");
     }
 
@@ -445,6 +461,30 @@ public final class ClientFakeServerTest {
         T.check(!direct.getMessage().contains("52b0c3a1") && !direct.getMessage().contains("52f1d2e3"),
                 "scrubbed: " + direct.getMessage());
         T.eq("a session[...]' b", VsanFault.scrub("a session[x-1]y-2' b"), "scrub stops at a quote");
+    }
+
+    /**
+     * Codex review: re-login and the transport retry share the call's one
+     * deadline. Two 350 ms attempts under a 500 ms budget fail at about
+     * 500 ms (was: 721 ms, the repeat got a fresh 500 ms).
+     */
+    static void oneDeadlineAcrossRetries() throws Exception {
+        for (String mode : new String[] {"slowNotAuthOnce", "slowResetOnce"}) {
+            try (Server s = new Server()) {
+                s.perfMode = mode;
+                VsanJsonClient c = client(s, 10_000, new T.RecLog());
+                c.instanceUuid(10_000);
+                long now = System.currentTimeMillis();
+                long t0 = System.nanoTime();
+                T.expect(HttpTimeoutException.class, () -> c.queryPerf("domain-c6004",
+                        EntityType.HOST_DOMOWNER, now - CycleEngine.WINDOW_MS, now, 500),
+                        mode + ": the budget covers the repeat");
+                long took = (System.nanoTime() - t0) / 1_000_000;
+                T.check(took <= 600, mode + ": failed at " + took + " ms, budget 500 ms");
+                T.eq(2, s.perfCalls.get(), mode + ": the repeat was attempted");
+            }
+        }
+        T.check(VsanJsonClient.remainingMs(VsanJsonClient.deadlineIn(1)) <= 1, "deadline helper");
     }
 
     /** Review N4: an answer that is not usable is not re-sent. */

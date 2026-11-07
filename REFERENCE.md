@@ -1,6 +1,6 @@
 # VCF Content Factory vSAN Performance: Reference
 
-Build 0.1.0.5 (Build 1 of the design). Design: the factory's
+Build 0.1.0.6 (Build 1 of the design). Design: the factory's
 `knowledge/designs/vsanperf-mp-v1.md`.
 
 ## Adapter
@@ -32,7 +32,7 @@ per-instance Suite API credential; there is no Ops credential field.
 | Clusters to include | `cluster_include` | empty = every vSAN cluster | yes | comma list of cluster names (exact, case-insensitive) or MoRefs (`domain-c6004`) |
 | Clusters to exclude | `cluster_exclude` | empty | no (Advanced) | applied after include |
 | Parallel clusters | `max_parallel_clusters` | 4 | no (Advanced) | 1 to 16 workers; parallelism is across clusters only |
-| Call timeout (s) | `call_timeout_seconds` | 30 | no (Advanced) | per HTTP call, send to last body byte |
+| Call timeout (s) | `call_timeout_seconds` | 30 | no (Advanced) | per call, send to last body byte; a re-login and the one transport retry share the same budget, and no call outlives the cycle deadline |
 | Cycle deadline (s) | `cycle_deadline_seconds` | 0 = interval minus 60 s | no (Advanced) | at the deadline completed clusters are pushed, the rest count as timed out |
 | Performance timing logging | `perf_timing_logging` | false | no (Advanced) | `PERF` lines at INFO, below |
 

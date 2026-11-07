@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.0.6 (Unreleased)
+
+- fix(adapter): build 6, two defects from the external (Codex) review of
+  the Build 1 PR.
+  - Scheduling starvation: the cycle's start cursor advanced only when a
+    cluster finished OK, so a cluster whose calls always outlast the cycle
+    budget was first every cycle and the clusters after it were never
+    queried (one worker, two clusters: after three cycles the first queried
+    three times, the second never). The cursor is now the furthest cluster
+    a worker started, whatever the outcome (OK, failed, timed out, cut), and
+    the next cycle starts after it.
+  - Timeout not carried through retries: a call's repeat after
+    NotAuthenticated or a transport failure got the whole original budget
+    again (a 500 ms budget ended at 721 ms with two 350 ms attempts). Each
+    public client call now fixes one absolute deadline; Login, the release
+    fallback, ServiceInstance content, re-login, the transport retry, view
+    create, every RetrievePropertiesEx page and DestroyView all spend it,
+    each exchange gets only the time left (capped by the call timeout), and
+    a spent deadline fails before sending. The engine already passes each
+    caller-thread call the lesser of the call timeout and the time left to
+    the cycle deadline, so inventory now ends inside the cycle budget too.
+  - Tests: EngineTest `noStarvationBehindSlowCluster` (the repro: the
+    second cluster is queried from cycle 2 on, the slow one still gets a turn
+    every cycle); ClientFakeServerTest `oneDeadlineAcrossRetries` (two 350 ms
+    attempts, after NotAuthenticated and after a reset, under a 500 ms
+    budget fail by about 500 ms, asserted at or under 600 ms).
+
 ## 0.1.0.5 (Unreleased)
 
 - fix(adapter): build 5, every finding of the build 4 review (factory

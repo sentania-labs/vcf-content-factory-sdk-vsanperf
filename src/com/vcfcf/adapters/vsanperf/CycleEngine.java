@@ -148,8 +148,13 @@ final class CycleEngine {
     private Set<String> missesSinceRefresh = Collections.emptySet();
     private boolean missWarnedSinceRefresh;
     private Set<String> unresolvedNodeWarned = new HashSet<>();
-    /** Fairness: the last cluster completed in the previous cycle. */
-    private String lastCompleted;
+    /**
+     * Fairness: the furthest cluster, in last cycle's order, that a worker
+     * started, whatever its outcome (Codex review: advancing only on success
+     * let a cluster that always runs past the deadline be first every cycle
+     * and starve the ones after it).
+     */
+    private String lastAttempted;
     private final Set<String> skipInfoLogged = new HashSet<>();
     private final Set<String> uuidWarned = new HashSet<>();
 
@@ -458,8 +463,8 @@ final class CycleEngine {
             sorted.put(c.moid, c);
         }
         List<Inventory.Cluster> order = new ArrayList<>(sorted.values());
-        if (lastCompleted != null && order.size() > 1) {
-            String start = sorted.higherKey(lastCompleted);
+        if (lastAttempted != null && order.size() > 1) {
+            String start = sorted.higherKey(lastAttempted);
             if (start != null) {
                 int i = new ArrayList<>(sorted.keySet()).indexOf(start);
                 Collections.rotate(order, -i);
@@ -502,8 +507,12 @@ final class CycleEngine {
         ExecutorService pool = Executors.newFixedThreadPool(workers, threads(id));
         Map<String, Future<?>> futures = new LinkedHashMap<>();
         long submitAt = clock.getAsLong();
-        for (Inventory.Cluster c : scope) {
+        AtomicInteger furthestStarted = new AtomicInteger(-1);
+        for (int idx = 0; idx < scope.size(); idx++) {
+            final Inventory.Cluster c = scope.get(idx);
+            final int position = idx;
             futures.put(c.moid, pool.submit(() -> {
+                furthestStarted.accumulateAndGet(position, Math::max);
                 int now = inFlight.incrementAndGet();
                 maxInFlight.accumulateAndGet(now, Math::max);
                 try {
@@ -561,6 +570,10 @@ final class CycleEngine {
                 }
             }
         }
+        // The next cycle starts after the furthest cluster attempted here,
+        // completed, failed, timed out or cut.
+        int furthest = furthestStarted.get();
+        if (furthest >= 0) lastAttempted = scope.get(furthest).moid;
         if (fatalError != null) {
             // Review B1: the pool is shut down above; the error ends the cycle.
             log.error("cycle " + id + ": " + fatalError.getClass().getSimpleName()
@@ -650,7 +663,6 @@ final class CycleEngine {
             case FAILED: res.clustersFailed++; break;
             default: res.clustersTimedOut++; break;
         }
-        if (d.outcome == Outcome.OK) lastCompleted = d.cluster.moid;
         if (d.warn != null) {
             log.warn("cluster " + d.cluster.moid + " (" + d.cluster.name + "): " + d.warn);
             res.error("cluster " + d.cluster.moid + ": " + d.warn);

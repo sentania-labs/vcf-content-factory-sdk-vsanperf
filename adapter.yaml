@@ -19,6 +19,6 @@ description: >
   Replaces the Python vsanhostmetrics pack at scale; distinct adapter kind,
   so the two run side by side.
 version: 0.1.0
-build_number: 5
+build_number: 6
 tier: 2
 released: false

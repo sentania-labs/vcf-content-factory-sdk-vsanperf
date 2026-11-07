@@ -24,7 +24,9 @@ Design: the factory's `knowledge/designs/vsanperf-mp-v1.md`.
 - Three Performance Service calls per vSAN cluster per cycle (one wildcard
   query per entity type, the API's floor), 7-minute window, labels filter,
   gzip. Clusters run through a bounded pool (**Parallel clusters**, default
-  4); each cluster's calls run in order, DOM owner first.
+  4); each cluster's calls run in order, DOM owner first. Each cycle starts
+  after the last cluster the previous cycle attempted, so a cluster that
+  always runs past the deadline cannot starve the ones after it.
 - Values carry the sample's own 5-minute timestamp; a bucket already pushed
   is not pushed again (tracked per entity and metric, and only once the
   push came back clean).

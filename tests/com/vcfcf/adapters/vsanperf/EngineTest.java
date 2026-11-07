@@ -162,6 +162,7 @@ public final class EngineTest {
         mixedTimestampRows();
         labelLagsWithinEntity();
         capsWithinTimeGroup();
+        noStarvationBehindSlowCluster();
         System.out.println("EngineTest: all assertions passed");
     }
 
@@ -495,6 +496,35 @@ public final class EngineTest {
         T.eq(at("02:30:00"), ops.calls.get(0).getKey(), "under T");
         T.near(8, ops.calls.get(0).getValue().get("rid-host-6017")
                 .get("vSAN Perf|DOM Client|iopsWrite"), "iopsWrite's T value pushed");
+    }
+
+    /**
+     * Codex review: one worker, two clusters, the first cluster's call longer
+     * than the cycle budget. The scheduling cursor advances on the cut too,
+     * so the second cluster is queried in the next cycle (was: never).
+     */
+    static void noStarvationBehindSlowCluster() throws Exception {
+        FakeVc vc = new FakeVc();
+        vc.inventory = new Inventory(List.of(
+                new Inventory.Cluster("domain-c1", "slow", List.of(new Inventory.Host("host-a",
+                        "a", "node-a", "U", true))),
+                new Inventory.Cluster("domain-c2", "healthy", List.of(new Inventory.Host("host-b",
+                        "b", "node-b", "U", true)))));
+        vc.delays.put("domain-c1|host-domowner", 5_000L);
+        FakeOps ops = labOps(vc.inventory);
+        CycleEngine e = engine(vc, ops, 1, 30_000, new T.RecLog(), "");
+        CycleEngine.Result r1 = e.run(in(400));
+        T.eq(1, vc.calls("domain-c1", EntityType.HOST_DOMOWNER), "cycle 1 starts with c1");
+        T.eq(0, vc.calls("domain-c2", EntityType.HOST_DOMOWNER), "c2 not reached in cycle 1");
+        T.eq(2, r1.clustersTimedOut, "both unfinished");
+        CycleEngine.Result r2 = e.run(in(400));
+        T.eq(1, vc.calls("domain-c2", EntityType.HOST_DOMOWNER), "c2 queried in cycle 2");
+        T.eq(1, r2.clustersOk, "c2 completed");
+        // Cycle 2 went c2 then c1 (c1 started once c2 was done, then cut).
+        T.eq(2, vc.calls("domain-c1", EntityType.HOST_DOMOWNER), "c1 attempted after c2");
+        e.run(in(400));
+        T.eq(2, vc.calls("domain-c2", EntityType.HOST_DOMOWNER), "c2 queried again in cycle 3");
+        T.eq(3, vc.calls("domain-c1", EntityType.HOST_DOMOWNER), "c1 still gets its turn");
     }
 
     /** The 100-host cap applies within a time group: 150 hosts, one time, two calls. */

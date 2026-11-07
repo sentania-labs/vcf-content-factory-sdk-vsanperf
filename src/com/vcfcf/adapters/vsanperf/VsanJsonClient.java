@@ -159,12 +159,12 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
     // ------------------------------------------------------------------
 
     /** The current session, logging in (and reading ServiceContent) when there is none. */
-    Session session(long timeoutMs) throws IOException, InterruptedException {
+    Session session(long deadline) throws IOException, InterruptedException {
         Session s = session;
         if (s != null) return s;
         synchronized (lock) {
             if (closed) throw new IOException("the vCenter client is closed");
-            if (session == null) session = login(timeoutMs);
+            if (session == null) session = login(deadline);
             return session;
         }
     }
@@ -173,26 +173,26 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
      * Replace {@code stale} with a fresh session, unless another thread
      * already did; then that one is returned.
      */
-    private Session relogin(Session stale, long timeoutMs)
+    private Session relogin(Session stale, long deadline)
             throws IOException, InterruptedException {
         synchronized (lock) {
             if (closed) throw new IOException("the vCenter client is closed");
             if (session != null && session != stale) return session;
             session = null;
             log.info("vCenter session expired (NotAuthenticated); logging in again");
-            session = login(timeoutMs);
+            session = login(deadline);
             return session;
         }
     }
 
-    private Session login(long timeoutMs) throws IOException, InterruptedException {
+    private Session login(long deadline) throws IOException, InterruptedException {
         String token;
         try {
-            token = loginOnce(timeoutMs);
+            token = loginOnce(deadline);
         } catch (VsanFault f) {
             if (!f.is(VsanFault.INVALID_REQUEST) || !PINNED_RELEASE.equals(release)) throw f;
             // Design Q5: the pinned id is unknown to this server; use its own.
-            String own = readServerRelease(timeoutMs);
+            String own = readServerRelease(deadline);
             if (own == null || own.equals(release)) {
                 throw new IOException("vCenter refused release id " + release
                         + " (" + f.faultClass + ") and its /sdk/vimServiceVersions.xml "
@@ -201,18 +201,18 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
             log.info("vCenter refused release id " + PINNED_RELEASE
                     + "; using the server's own vim25 version " + own);
             release = own;
-            token = loginOnce(timeoutMs);
+            token = loginOnce(deadline);
         }
-        return readContent(token, timeoutMs);
+        return readContent(token, deadline);
     }
 
-    private String loginOnce(long timeoutMs) throws IOException, InterruptedException {
+    private String loginOnce(long deadline) throws IOException, InterruptedException {
         String body = "{\"userName\":" + Json.quote(username)
                 + ",\"password\":" + Json.quote(password) + "}"; // REDACT-SECRET
         Reply r;
         try {
             r = exchange("POST", vim("SessionManager/SessionManager/Login"), body, null,
-                    timeoutMs, "Login");
+                    deadline, "Login");
         } catch (StatusException e) {
             if (e.status == 404 || e.status == 405 || e.status == 400) {
                 throw new IOException("vCenter did not accept the vSphere JSON API (Login "
@@ -228,10 +228,10 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
         return token;
     }
 
-    private Session readContent(String token, long timeoutMs)
+    private Session readContent(String token, long deadline)
             throws IOException, InterruptedException {
         Reply r = exchange("GET", vim("ServiceInstance/ServiceInstance/content"), null, token,
-                timeoutMs, "ServiceInstance content");
+                deadline, "ServiceInstance content");
         SimpleJson c;
         try {
             c = SimpleJson.parse(r.body);
@@ -247,8 +247,8 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
     }
 
     /** The server's vim25 version from {@code /sdk/vimServiceVersions.xml}, or {@code null}. */
-    private String readServerRelease(long timeoutMs) throws IOException, InterruptedException {
-        Reply r = exchange("GET", "/sdk/vimServiceVersions.xml", null, null, timeoutMs,
+    private String readServerRelease(long deadline) throws IOException, InterruptedException {
+        Reply r = exchange("GET", "/sdk/vimServiceVersions.xml", null, null, deadline,
                 "vimServiceVersions.xml");
         return parseVim25Version(r.body);
     }
@@ -270,7 +270,7 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
         if (s == null) return;
         try {
             exchange("POST", vim("SessionManager/SessionManager/Logout"), "{}", s.token,
-                    Math.min(callTimeoutMs, 5000), "Logout");
+                    deadlineIn(Math.min(callTimeoutMs, 5000)), "Logout");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (IOException | RuntimeException e) {
@@ -284,7 +284,7 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
 
     @Override
     public String instanceUuid(long timeoutMs) throws IOException, InterruptedException {
-        return session(timeoutMs).instanceUuid;
+        return session(deadlineIn(timeoutMs)).instanceUuid;
     }
 
     /** Release, product and API version of the current session, for the configure log. */
@@ -299,7 +299,8 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
 
     @Override
     public Inventory readInventory(long timeoutMs) throws IOException, InterruptedException {
-        return authenticated(timeoutMs, s -> readInventory(s, timeoutMs, true));
+        long deadline = deadlineIn(timeoutMs);
+        return authenticated(deadline, s -> readInventory(s, deadline, true));
     }
 
     /** Pages read by the last inventory read (for the PERF inventory line). */
@@ -317,7 +318,7 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
      * ignored), creates a new one and reads once more. The view moId embeds
      * the vCenter session key: it is never logged or put in a message.
      */
-    private Inventory readInventory(Session s, long timeoutMs, boolean mayRecreateView)
+    private Inventory readInventory(Session s, long deadline, boolean mayRecreateView)
             throws IOException, InterruptedException {
         if (s.rootFolder == null || s.propertyCollector == null || s.viewManager == null) {
             throw new IOException("ServiceInstance content names no rootFolder, "
@@ -325,11 +326,11 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
         }
         String view = s.clusterView;
         if (view == null) {
-            view = createClusterView(s, timeoutMs);
+            view = createClusterView(s, deadline);
             s.clusterView = view;
         }
         try {
-            return retrieveAll(s, view, timeoutMs);
+            return retrieveAll(s, view, deadline);
         } catch (VsanFault f) {
             if (f.is(VsanFault.NOT_AUTHENTICATED)) throw f;
             if (!mayRecreateView) {
@@ -341,17 +342,17 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
             log.warn("inventory read on the cluster view failed (" + f.faultClass
                     + "); recreating the view and reading once more");
             s.clusterView = null;
-            destroyView(s, view);
-            return readInventory(s, timeoutMs, false);
+            destroyView(s, view, deadline);
+            return readInventory(s, deadline, false);
         }
     }
 
-    private Inventory retrieveAll(Session s, String view, long timeoutMs)
+    private Inventory retrieveAll(Session s, String view, long deadline)
             throws IOException, InterruptedException {
         Inventory.Builder b = new Inventory.Builder();
         Reply r = exchange("POST", vim("PropertyCollector/" + s.propertyCollector
                 + "/RetrievePropertiesEx"), Inventory.retrieveBody(view), s.token,
-                timeoutMs, "RetrievePropertiesEx");
+                deadline, "RetrievePropertiesEx");
         String token = b.addPage(r.body);
         int pages = 1;
         while (token != null) {
@@ -361,7 +362,7 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
             }
             r = exchange("POST", vim("PropertyCollector/" + s.propertyCollector
                     + "/ContinueRetrievePropertiesEx"), "{\"token\":" + Json.quote(token) + "}",
-                    s.token, timeoutMs, "ContinueRetrievePropertiesEx");
+                    s.token, deadline, "ContinueRetrievePropertiesEx");
             token = b.addPage(r.body);
         }
         lastInventoryPages = pages;
@@ -369,10 +370,10 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
     }
 
     /** {@code DestroyView} on a view; every failure is ignored and nothing is logged. */
-    private void destroyView(Session s, String view) throws InterruptedException {
+    private void destroyView(Session s, String view, long deadline) throws InterruptedException {
         try {
             exchange("POST", vim("ContainerView/" + pathSegment(view) + "/DestroyView"), "{}",
-                    s.token, Math.min(callTimeoutMs, 5000), "DestroyView");
+                    s.token, deadline - deadlineIn(5000) < 0 ? deadline : deadlineIn(5000), "DestroyView");
         } catch (IOException | RuntimeException ignored) {
             // destroy-ignore (design failure table); the moId is never logged
         }
@@ -393,13 +394,13 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
         return b.toString();
     }
 
-    private String createClusterView(Session s, long timeoutMs)
+    private String createClusterView(Session s, long deadline)
             throws IOException, InterruptedException {
         String body = "{\"container\":{\"_typeName\":\"ManagedObjectReference\",\"type\":\"Folder\","
                 + "\"value\":" + Json.quote(s.rootFolder) + "},\"type\":[\"ClusterComputeResource\"],"
                 + "\"recursive\":true}";
         Reply r = exchange("POST", vim("ViewManager/" + s.viewManager + "/CreateContainerView"),
-                body, s.token, timeoutMs, "CreateContainerView");
+                body, s.token, deadline, "CreateContainerView");
         String v;
         try {
             v = SimpleJson.parse(r.body).get("value").asString();
@@ -445,9 +446,10 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
     @Override
     public CycleEngine.PerfCall queryPerf(String clusterMoid, EntityType type, long startMs,
             long endMs, long timeoutMs) throws IOException, InterruptedException {
+        long deadline = deadlineIn(timeoutMs);
         String body = perfBody(type, clusterMoid, startMs, endMs);
-        return authenticated(timeoutMs, s -> {
-            Reply r = exchange("POST", perfPath(), body, s.token, timeoutMs,
+        return authenticated(deadline, s -> {
+            Reply r = exchange("POST", perfPath(), body, s.token, deadline,
                     "VsanPerfQueryPerf " + type.id);
             if (r.body == null) {
                 throw new Unreadable("VsanPerfQueryPerf " + type.id + " returned no body");
@@ -471,16 +473,15 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
      * log in again once and run it once more. A transport failure (no
      * answer, not a timeout) is re-sent once inside the same budget.
      */
-    private <T> T authenticated(long timeoutMs, WithSession<T> call)
+    private <T> T authenticated(long deadline, WithSession<T> call)
             throws IOException, InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-        Session s = session(timeoutMs);
+        Session s = session(deadline);
         try {
             return retryTransport(deadline, () -> call.run(s));
         } catch (VsanFault f) {
             if (!f.is(VsanFault.NOT_AUTHENTICATED)) throw f;
         }
-        Session fresh = relogin(s, remaining(deadline, timeoutMs));
+        Session fresh = relogin(s, deadline);
         try {
             return retryTransport(deadline, () -> call.run(fresh));
         } catch (VsanFault f) {
@@ -520,9 +521,19 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
                 && !(e.getCause() instanceof javax.net.ssl.SSLException);
     }
 
-    private static long remaining(long deadlineNanos, long floorMs) {
-        long ms = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
-        return ms > 0 ? ms : Math.min(floorMs, 1000);
+    /**
+     * The absolute deadline ({@link System#nanoTime}) {@code timeoutMs} from
+     * now. Each public call fixes it once; login, re-login, the transport
+     * retry and every page then share it (Codex review: a retried call
+     * reused the whole budget).
+     */
+    static long deadlineIn(long timeoutMs) {
+        return System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(1, timeoutMs));
+    }
+
+    /** Milliseconds left until {@code deadline}, at most 0 when spent. */
+    static long remainingMs(long deadline) {
+        return TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
     }
 
     private String vim(String tail) {
@@ -530,13 +541,19 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
     }
 
     /**
-     * One HTTP exchange bounded by {@code timeoutMs} from send to the
-     * last body byte. 200 and 204 return; an error status with a fault
+     * One HTTP exchange, send to last body byte, bounded by the time left
+     * until {@code deadline} (absolute {@link System#nanoTime}) and by the
+     * per-call timeout, whichever is less; a spent deadline fails before
+     * sending (HttpTimeoutException). 200 and 204 return; an error status with a fault
      * body throws {@link VsanFault}; anything else {@link StatusException}.
      */
-    Reply exchange(String method, String path, String body, String token, long timeoutMs,
+    Reply exchange(String method, String path, String body, String token, long deadline,
             String what) throws IOException, InterruptedException {
-        long budget = Math.max(1, Math.min(timeoutMs, callTimeoutMs));
+        long left = remainingMs(deadline);
+        if (left <= 0) {
+            throw new HttpTimeoutException(what + ": the call's time budget is spent");
+        }
+        long budget = Math.min(left, callTimeoutMs);
         HttpRequest.Builder rb = HttpRequest.newBuilder(URI.create(baseUrl + path))
                 .timeout(Duration.ofMillis(budget))
                 .header("Accept", "application/json")
