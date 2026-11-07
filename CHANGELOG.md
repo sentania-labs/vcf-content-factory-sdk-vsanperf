@@ -1,5 +1,120 @@
 # Changelog
 
+## 0.1.0.6 (Unreleased)
+
+- fix(adapter): build 6, two defects from the external (Codex) review of
+  the Build 1 PR.
+  - Scheduling starvation: the cycle's start cursor advanced only when a
+    cluster finished OK, so a cluster whose calls always outlast the cycle
+    budget was first every cycle and the clusters after it were never
+    queried (one worker, two clusters: after three cycles the first queried
+    three times, the second never). The cursor is now the furthest cluster
+    a worker started, whatever the outcome (OK, failed, timed out, cut), and
+    the next cycle starts after it.
+  - Timeout not carried through retries: a call's repeat after
+    NotAuthenticated or a transport failure got the whole original budget
+    again (a 500 ms budget ended at 721 ms with two 350 ms attempts). Each
+    public client call now fixes one absolute deadline; Login, the release
+    fallback, ServiceInstance content, re-login, the transport retry, view
+    create, every RetrievePropertiesEx page and DestroyView all spend it,
+    each exchange gets only the time left (capped by the call timeout), and
+    a spent deadline fails before sending. The engine already passes each
+    caller-thread call the lesser of the call timeout and the time left to
+    the cycle deadline, so inventory now ends inside the cycle budget too.
+  - Tests: EngineTest `noStarvationBehindSlowCluster` (the repro: the
+    second cluster is queried from cycle 2 on, the slow one still gets a turn
+    every cycle); ClientFakeServerTest `oneDeadlineAcrossRetries` (two 350 ms
+    attempts, after NotAuthenticated and after a reset, under a 500 ms
+    budget fail by about 500 ms, asserted at or under 600 ms).
+
+## 0.1.0.5 (Unreleased)
+
+- fix(adapter): build 5, every finding of the build 4 review (factory
+  `knowledge/context/reviews/vsanperf-build-4-review.md`, 2 BLOCKING,
+  3 WARNING, 8 NIT) and two design corrections.
+  - B1: a worker catches every throwable. A `VirtualMachineError` (or a
+    thread kill) is carried to the caller thread in `ClusterDone`, the pool
+    is shut down and the error is rethrown, ending the cycle; any other
+    throwable fails the cluster with "internal error (<class>)". Was:
+    swallowed by the `FutureTask`, cluster counted OK, `last_error=none`.
+  - B2: a ContainerView fault that survives the view's recreation is
+    rethrown with fixed text, never the server's faultstring, which can
+    name the view (its moId embeds the vCenter session key). Every vSphere
+    fault text is also scrubbed of `session[...]...` ids. REFERENCE.md's
+    logging claim is corrected to what the code guarantees.
+  - W1: README "Acceptance on each platform" (and docs) states the T5
+    checks: self-metrics on the instance, and DOWN (not ERROR "nothing to
+    collect") for an unreachable vCenter; and why the cycle runs in
+    `rediscover` rather than compliance's `collect()`.
+  - W2 (no stitched-key section in the generated docs) is a factory
+    tooling gap, routed by the orchestrator; no pak change.
+  - W3: design T3 (replay harness) and T4 (65 MB heap gate at 70 clusters)
+    are **open and gate the first `v*` tag** (README "Open before the first
+    v* tag", docs/overview.md Known Limitations). Not built this round.
+  - N1: Stop Collecting is logged and counted as stopped, not as the cycle
+    deadline or `clusters_timed_out`. N2: the perf-phase span is a per-cycle
+    object, so a straggler of a cut cycle cannot move the next cycle's call
+    rate. N3: the newest sample is chosen by timestamp, not CSV position.
+    N4: an answer that cannot be parsed (`Unreadable`) is never re-sent.
+    N6: why the HostSystem list is filtered client side (the vendor spec
+    has no identifier filter on `GET /api/resources`), in `OpsHostMap`.
+    N7: a host collected later is picked up within about an hour,
+    documented. N8: a `RuntimeException` on the caller thread becomes a
+    failed cycle with fixed text, after the self-metrics and `last_error`
+    are pushed.
+  - Design correction (push timestamps): values are grouped by sample time
+    first, one `pushStatsBatch` call per time, and the 100-host / ~1 MB caps
+    apply within each time group (was: caps across all groups).
+  - Design correction plus N5: the duplicate-suppression mark is per
+    (entityRefId, label), not per entity, and is recorded only after every
+    push of the cycle came back clean; a failed batch's buckets are re-sent
+    next cycle while still in the window.
+  - Tests: EngineTest gains an OutOfMemoryError probe, a RuntimeException
+    after the call and from the call, a caller-thread defect, Stop
+    Collecting, an unclean push re-sent, mixed sample times pushed each
+    under its own time, the 100-host cap within one time, and a label that
+    lags another within one entity; ClientFakeServerTest gains a view fault
+    whose text carries a real-shaped `session[<uuid>]<uuid>` id (absent from
+    the log, the thrown message and `last_error`) and an unreadable answer
+    sent once; PerfParserTest gains newest-by-time.
+
+## 0.1.0.4 (Unreleased)
+
+- feat(adapter): build 4, the first vSAN Performance build (design Build 1,
+  factory `knowledge/designs/vsanperf-mp-v1.md` with its 2026-11-06
+  Addendum; Q1 to Q5 on the recommended answers). The template skeleton is
+  renamed to adapter kind `vcfcf_vsanperf`, entry class
+  `com.vcfcf.adapters.vsanperf.VsanPerfAdapter`, display name "VCF Content
+  Factory vSAN Performance"; the example classes and tests are removed.
+  describe.xml declares only the adapter instance: `vcenter_host` and
+  `cluster_include` as identity, `cluster_exclude`, `max_parallel_clusters`
+  (4), `call_timeout_seconds` (30), `cycle_deadline_seconds` (0 = interval
+  minus 60 s) and `perf_timing_logging` (false) as Advanced settings, and
+  twelve `Collection|*` self-metrics (including `perf_calls_per_second` over
+  the perf phase's elapsed time and `perf_call_ms_avg`). New SDK-free
+  classes: `VsanJsonClient` (vSphere JSON API: Login with the
+  `vmware-api-session-id` header reused across cycles, re-login once on
+  NotAuthenticated, release id 8.0.3.0 with fallback to the server's vim25
+  version, gzip, 4 MB wire / 8 MB decoded caps, fault bodies read up to
+  64 KB, per-call timeout, faults never re-sent, one transport retry; the
+  session-lived ContainerView inventory read with ContinueRetrievePropertiesEx
+  paging and destroy-recreate-retry on a view fault, its moId never logged),
+  `Inventory` (boxed PropertyCollector values; a cluster is vSAN when a
+  member host has enabled=true and a clusterInfo.uuid, majority uuid with
+  one WARN; empty nodeUuid left out), `PerfParser` (newest non-None sample
+  with its own timestamp, per-mille to percent), `EntityType` (the design's
+  61 keys), `OpsHostMap` (HostSystem by MoRef plus VMEntityVCID, ambiguous
+  and VCID-less rows never matched), `CycleEngine` (bounded pool across
+  clusters, DOM owner first, cycle deadline, per-entityRefId duplicate
+  suppression, learned types for 24 h, batched stats push per sample time,
+  `PERF` lines), `VsanPerfConfig`, `ClusterFilter`, `CappedBody`,
+  `VsanFault`, `Watermarks`, `LearnedTypes`, `Failures`. Tests: eight
+  plain-main classes (T1 and T2 of the design) over verbatim captures copied
+  to `tests/fixtures/vsan-perfsvc-json/` with provenance, plus a JDK
+  `HttpServer` fake vCenter; a verbatim `SimpleJson` copy in `tests/stubs/`.
+  README, REFERENCE.md and docs rewritten for the pak (migration from the
+  Python pack, collector-group advice).
+
 ## 0.1.0.3 (Unreleased)
 
 - ci: supply-chain and release hardening (#18). The release workflow splits

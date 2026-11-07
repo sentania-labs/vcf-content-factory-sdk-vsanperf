@@ -1,71 +1,141 @@
-# VCF Content Factory — SDK adapter template
+# VCF Content Factory vSAN Performance
 
-A minimal, fully-wired skeleton for a **Tier 2 Java SDK management-pack adapter**
-for VCF Operations, built and released independently of the VCF Content Factory.
+A Tier 2 (Java SDK) management pack for VCF Operations. It reads the vSAN
+Performance Service over the vSphere JSON API and puts the numbers on the
+hosts you already have: the vCenter adapter's own VMWARE HostSystem
+objects, as keys under `vSAN Perf`. It creates no objects besides its
+adapter instance.
 
-This template tracks the current framework v2 idioms used by the production
-adapters (`compliance`, `unifi`). The example adapter discovers one
-`ExampleResource` kind under a `World` traversal anchor and pushes one metric and
-one property per resource — replace the resource kinds, endpoints, and metric
-keys with your target system, keeping the SHAPE.
+Build 1 covers three entity types, 61 keys: DOM owner (38 per host), DOM
+client (6 per host) and vSAN physical NICs (17 per NIC, instanced as
+`vSAN Perf|pNIC:vmnic1|...`). On a 5-host cluster that is up to 390 series
+per cycle. Every key, unit and self-metric: [REFERENCE.md](REFERENCE.md).
+Design: the factory's `knowledge/designs/vsanperf-mp-v1.md`.
 
-## Documentation
+## How it collects
 
-Every SDK pak ships a standard docset under [`docs/`](docs/README.md):
-a generated inventory-tree diagram (kinds + identifying keys), plus
-hand-curated `overview.md` and `installing.md` prose pages. The two prose
-pages are scaffolded once by `docs-gen` and then curated — in this template
-they carry placeholder guidance telling you what to write when you
-instantiate a pak. Regenerate the derived files (diagram, inventory tree,
-`docs/README.md`) on every build; never hand-edit them.
+- One vCenter session per adapter instance, reused across cycles; logged
+  in again once if vCenter drops it. Release id `8.0.3.0`, or the server's
+  own vim25 version if vCenter refuses that one.
+- Inventory: one PropertyCollector read per cycle over a session-lived view
+  of clusters and their hosts (paged when vCenter pages it). A cluster
+  counts as vSAN when a member host has vSAN enabled and a vSAN cluster
+  uuid.
+- Three Performance Service calls per vSAN cluster per cycle (one wildcard
+  query per entity type, the API's floor), 7-minute window, labels filter,
+  gzip. Clusters run through a bounded pool (**Parallel clusters**, default
+  4); each cluster's calls run in order, DOM owner first. Each cycle starts
+  after the last cluster the previous cycle attempted, so a cluster that
+  always runs past the deadline cannot starve the ones after it.
+- Values carry the sample's own 5-minute timestamp; a bucket already pushed
+  is not pushed again (tracked per entity and metric, and only once the
+  push came back clean).
+- Hosts are matched on host MoRef plus vCenter instance UUID, never by
+  name. A host with no HostSystem object of this vCenter in VCF Operations
+  is counted in `Collection|hosts_unresolved` and its data is dropped. The
+  HostSystem list is re-read every 12th cycle (or when a cluster's host set
+  changes), so a host the vCenter adapter starts collecting later is picked
+  up within about an hour.
+- Pushes go through the Suite API, one call per sample time, in batches of
+  up to 100 hosts and about 1 MB within each time.
+- A cycle deadline (default: interval minus 60 s) stops the cycle; clusters
+  that finished are still pushed.
 
-## What's here
+Pushed keys carry no label or unit in the UI (VCF Operations takes
+HostSystem metadata from the vCenter adapter), so the unit is in the key
+name: `Us` microseconds, `BytesPerSec`, `Pct` for per-mille values converted
+to percent.
+
+## Requirements
+
+- vCenter with the vSphere JSON API (vCenter 8.0 Update 1 or later; release
+  id 8.0.3.0 was proven on 9.1.1). An older vCenter fails Test Connection
+  with a message saying so.
+- A read-only vCenter account.
+- The vCenter adapter collecting the same vCenter in VCF Operations (the
+  HostSystem objects the keys land on).
+
+## Deployment
+
+- **Pin each instance to its own collector group** when you can, so its
+  pool and heap do not compete with other adapters on the collector.
+- One instance can carry many clusters. To shard a large vCenter, create
+  several instances with different **Clusters to include**; that field is
+  part of the account's identity, so the instances are distinct accounts.
+- Turn **Performance timing logging** on for a cycle or two to read call
+  times, the aggregate call rate and push times from the instance log
+  (`PERF` lines).
+
+## Acceptance on each platform (before the first `v*` tag)
+
+Install on VCF Operations 8.18, 9.0 and 9.1 (design T5) and check, on each:
+
+1. **Self-metrics reach the instance.** `Collection|*` and
+   `Collection|last_error` read back on the vSAN Performance adapter
+   instance resource (`GET /suite-api/api/resources/{id}/stats` and
+   `.../properties`).
+2. **An unreachable vCenter shows the account DOWN**, not ERROR with
+   "Resource discovery failed and there was nothing to collect". Check the
+   account row's status and text with vCenter unreachable, and again with
+   wrong credentials (that one should be ERROR, with a credential-free
+   message).
+3. One key per group read back on each host, against the same cycle's
+   `PERF` log; the Metrics tab shows `vSAN Perf > pNIC > vmnic1` (or note how
+   it renders).
+
+**Why both are open.** The whole cycle runs in the collector's
+`rediscover` hook, not in `collect()` for a resource of its own as the
+compliance pack does (it discovers a `ComplianceWorld` object). This pack
+creates no object, and `rediscover` is the one per-cycle hook that receives
+the adapter instance, which the self-metrics go onto. A failed cycle pushes
+the self-metrics, then throws; the framework logs that at WARN with a stack
+trace every failing cycle. If the platform lists the adapter instance among
+the resources it collects, `collect()` rethrows the failure there and the
+account row maps it (DOWN when vCenter is unreachable). If it does not, the
+row shows ERROR "Resource discovery failed and there was nothing to
+collect", never DOWN. No pak in this repo has proven which holds, so check
+2 decides it; if it shows ERROR, the cycle moves to `collect()` on the
+instance resource or the docs drop the DOWN claim.
+
+## Open before the first `v*` tag
+
+- **Design T3, replay harness:** recorded per-type responses replayed per
+  synthetic cluster with per-call latency and both call-ceiling models.
+  Not built.
+- **Design T4, heap budget gate:** 70 synthetic clusters x 6 hosts x 2 NICs
+  must stay under the 65 MB per-instance budget (design D6) inside the
+  cycle deadline. Not built; nothing yet verifies the scale claim.
+- The platform acceptance above (design T5).
+
+## Migrating from the Python vsanhostmetrics pack
+
+This pack is a different adapter kind (`vcfcf_vsanperf`, the Python pack is
+`VsanHostMetrics`), so it is **not an upgrade**. Both can run side by side
+while you compare. To move over: install this pack, create its account and
+credentials, compare, then uninstall the Python pack. **No data carries
+over:** the Python pack's per-entity objects and their history are removed
+with it, and this pack's history starts on HostSystem from its first cycle.
+
+## Repository layout
 
 ```
-adapter.yaml                              # name, version, build_number, adapter_kind, entry_class
-describe.xml                              # adapter descriptor (ResourceKinds, metrics, credentials)
-resources/resources.properties            # nameKey -> display strings
-icons/icons.yaml                          # ResourceKind -> icon mapping (optional)
-src/com/vcfcf/adapters/example/           # adapter Java source
-  ExampleAdapter.java                     #   the adapter (heavily commented — read this first)
-  ExampleApiClient.java                   #   thin REST client
-  ExampleConfig.java                      #   typed config POJO (validated host/port, redacted toString)
-  ExampleFailures.java                    #   unreachable (DOWN) vs failed (ERROR), cause-chain walk
-  ExampleValues.java                      #   numeric-or-absent check behind metricIfPresent
-  CycleCache.java                         #   one snapshot per collection cycle
-  ItemIndex.java                          #   id index; throws when a non-empty list has no ids
-  BoundedBody.java                        #   response body handler with an 8 MB cap
-tests/com/vcfcf/adapters/example/         # plain-main tests for the helpers above (no SDK jar)
-.github/workflows/build-pak-on-tag.yml    # CI: tag v* -> build .pak -> attach to Release
-.github/workflows/pak-tests.yml           # reusable CI: JDK 17 + 25 test matrix, no secrets, no SDK jar
-.github/workflows/tests.yml               # CI: every push and PR -> calls pak-tests.yml (@main in paks)
-ci/run_java_tests.sh                      # runs every tests/**/*Test.java, no SDK jar needed
-CHANGELOG.md                              # one line per build
+adapter.yaml, describe.xml, resources/, icons/   pak metadata and descriptor
+src/com/vcfcf/adapters/vsanperf/
+  VsanPerfAdapter.java    SDK glue: configure, Test Connection, the cycle hook
+  CycleEngine.java        the collector: inventory, pool, deadline, dedup, push
+  VsanJsonClient.java     vSphere JSON API client (session, inventory, QueryPerf)
+  Inventory.java          PropertyCollector result parser, cluster vSAN rule
+  PerfParser.java         QueryPerf response parser, newest-sample selection
+  EntityType.java         the 61-key catalog (design table)
+  OpsHostMap.java         HostSystem MoRef + vCenter UUID to Ops resource id
+  ...                     config, faults, caps, dedup marks, learned types
+tests/                    plain-main tests (ci/run_java_tests.sh), verbatim
+                          vendor fixtures with provenance, a SimpleJson stub
 ```
 
-There is **no `lib/` of bundled jars** (C2 pak shape — see below).
+## Tests
 
-## Instantiating a new pak
-
-1. **Create the repo from this template.** Click **Use this template** to create
-   `sentania-labs/vcf-content-factory-sdk-<name>`.
-2. **Register it in the factory.** Add one line to the factory's
-   `context/managed_paks.md` registry so `scripts/bootstrap_managed_paks.sh`
-   clones it into the gitignored `content/sdk-adapters/<name>/` working tree.
-3. **Rename the skeleton.** Pick your `adapter_kind` (snake_case) and apply it
-   consistently across:
-   - `adapter.yaml` — `adapter_kind`, `entry_class`, `name`, `description`;
-   - `describe.xml` — the `AdapterKind` key, the type-7 instance `ResourceKind`
-     key, credential/resource kinds, identifiers, groups, attributes;
-   - `resources/resources.properties` — the display strings;
-   - `icons/icons.yaml` — the resource-kind icon map;
-   - the Java package/class names and the `ADAPTER_KIND` constant.
-4. **Build out collection.** Replace the example HTTP calls and per-resource
-   collect logic. Keep the load-bearing idioms documented at the top of
-   `ExampleAdapter.java` — especially **collect-path discovery** (mandatory on
-   VCF Ops 9.0.2, which never calls `onDiscover()`), `componentLogger(Class)`,
-   cooperative cancellation, and loud-failure (no sentinel for an unreadable
-   value).
+`ci/run_java_tests.sh` runs every `tests/**/*Test.java` (no SDK jar needed).
 
 **Tests on every push and PR.** `sdk-validation.yml` verifies the release workflow’s pinned buildkit, runs `validate-sdk` without the private SDK jar, and tests the defect gate and real pak-compare exit statuses. Full framework/adapter compilation, deploy-key access, checksum handover, provenance and release upload are proved only by a tag build. The defect registry is pinned by `DEFECT_REGISTRY_COMMIT` in the release workflow; review and update that pin before releasing when the factory registry changes.
 

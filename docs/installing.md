@@ -1,90 +1,63 @@
-# Installing & Configuring — VCF Content Factory Example Adapter
-
-> **TEMPLATE** — this is the curated prose page of the standard SDK docset.
-> It is generated once as a scaffold and then hand-curated; the generator
-> never overwrites it again. When you instantiate a pak, **replace the
-> placeholder prose below** with the real prerequisites, permissions,
-> ports, and TLS guidance for your target system. Keep the **Configuration
-> Fields** table — it is regenerated from `describe.xml` and should reflect
-> your real config fields. Keep the section structure.
+# Installing & Configuring: VCF Content Factory vSAN Performance
 
 ## Prerequisites
 
-> List what must be true before install: the supported VCF Operations
-> versions, the target-system version/edition, network reachability (which
-> host/port), and the account the adapter authenticates with.
-
-- VCF Operations 8.x or 9.x (collect-path discovery is validated on
-  9.0.2).
-- Reachability from the VCF Operations collector to the target system on
-  its API port.
-- An account on the target system with read access to the data this pack
-  collects.
+- VCF Operations with the vCenter adapter collecting the vCenter (the
+  HostSystem objects the keys land on).
+- vCenter with the vSphere JSON API (8.0 Update 1 or later).
+- The Python vsanhostmetrics pack may stay installed; this pack is a
+  different adapter kind. See the README's migration section.
 
 ## Permissions Required
 
-> State the minimum privileges the adapter credential account needs.
-> Prefer least-privilege: the adapter should read only. Name the specific
-> API areas / roles required.
-
-The example adapter requires only read access to its (fictional) API.
+A read-only vCenter account, propagated from the root. Pushing onto
+HostSystem uses the platform's own per-instance Suite API credential.
 
 ## Network Requirements
 
-> One row per outbound flow the collector must be able to make. Replace the
-> port/purpose with your real endpoint(s).
+The collector (or Cloud Proxy) running the instance reaches vCenter on
+HTTPS (443, or the port you enter) and its own local Suite API.
 
-| Port | Protocol | Direction | Purpose |
-|------|----------|-----------|---------|
-| 443  | HTTPS    | Collector → target system | API reads |
+## TLS: certificate trust
 
-> If your adapter stitches over the ambient local Suite API, note that it
-> requires no additional outbound configuration.
-
-## TLS — certificate trust
-
-> Document how the adapter handles the target certificate: strict
-> validation against the platform trust store by default, with
-> `allowInsecure=true` as the documented opt-out. Tell the operator their
-> two options (import the cert, or set `allowInsecure=true`). If your target
-> commonly ships a self-signed cert, say so.
-
-By default the adapter validates the target certificate against the
-platform trust store. Set `allowInsecure=true` to disable validation, or
-import the target certificate into the trust store. The adapter logs a
-WARN on every configure while `allowInsecure=true`.
-
-**Upgrading from build 1:** build 1 shipped `allowInsecure` with a default
-of `true`. An existing instance keeps the value it was saved with, so an
-instance created with the old default still skips validation after the
-upgrade. Edit the instance and set Allow Insecure SSL to `false`.
+The vCenter certificate is checked against the VCF Operations trust store
+and must name the host as you enter it. An untrusted certificate brings up
+the accept dialog on Validate Connection; accepting does not fix a name
+mismatch, so enter vCenter by a name on its certificate.
 
 ## Configuration Fields
 
-When adding a new adapter instance in VCF Operations, you will be prompted
-for the fields below. This table is generated from `describe.xml` — keep it
-in sync with your real config fields (regenerate the docset after changing
-`describe.xml`), and add prose notes per field.
-
-| Field | Key | Required | Default | Notes |
-|-------|-----|----------|---------|-------|
-| Host / IP Address | `host` | Yes | — | Target hostname or IP. |
-| Port (HTTPS) | `port` | No | 443 | API port. |
-| Allow Insecure SSL | `allowInsecure` | No | false | Only `true` (any letter case, no surrounding spaces) disables certificate validation; blank or any other value keeps it on. |
+| Field | Default | Notes |
+|---|---|---|
+| vCenter Server | (required) | host or host:port; part of the account identity |
+| Clusters to include | all vSAN clusters | names or MoRefs, comma separated; part of the account identity |
+| Clusters to exclude | none | Advanced |
+| Parallel clusters | 4 | Advanced, 1 to 16 |
+| Call timeout (s) | 30 | Advanced |
+| Cycle deadline (s) | 0 (interval minus 60 s) | Advanced |
+| Performance timing logging | false | Advanced; `PERF` lines at INFO |
 
 ## Step-by-Step Installation
 
-1. Install the `.pak` file via **Administration > Solutions > Add**.
-2. After installation, navigate to **Data Sources > Integrations > Accounts**.
-3. Click **Add Account** and select **VCF Content Factory Example Adapter**.
-4. Fill in the configuration fields above.
-5. Click **Validate Connection**, then **Add**.
-6. The adapter discovers resources and begins collecting on the next cycle.
+1. Install the `.pak` (Administration > Integrations > Repository).
+2. Add an account: vCenter Server, credential, optionally Clusters to
+   include. Pin it to its own collector group if you can.
+3. Validate Connection: it logs in, reads the cluster inventory and checks
+   the local Suite API (logged only).
+4. After a cycle or two, check the instance's `Collection|*` metrics and a
+   host's `vSAN Perf` keys.
+
+Until the platform acceptance in the repo README ("Acceptance on each
+platform") has passed on your VCF Operations version, treat two things as
+unverified: that the `Collection|*` self-metrics appear on the instance,
+and that an unreachable vCenter shows the account DOWN rather than ERROR
+"Resource discovery failed and there was nothing to collect".
 
 ## Troubleshooting
 
-> List the common, expected failure modes and their remedies (TLS trust,
-> auth/session, no-data ERROR semantics, optional cross-link omission).
-
-- **Test Connection fails on TLS** — the target certificate is untrusted.
-  Set `allowInsecure=true` or import the certificate.
+- `Collection|last_error` holds the cycle's first problem.
+- `Collection|hosts_unresolved` above 0: the vCenter adapter is not
+  collecting some hosts, or a host's vSAN node uuid is not in the inventory.
+  A host the vCenter adapter starts collecting later is picked up within
+  about an hour (the HostSystem list is re-read every 12th cycle).
+- Turn on Performance timing logging and grep the instance log for `PERF`.

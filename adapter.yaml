@@ -1,29 +1,24 @@
-# adapter.yaml — pak metadata for the example/template adapter.
+# adapter.yaml: pak metadata for VCF Content Factory vSAN Performance.
 #
-# Field conventions match the production adapters (compliance, unifi):
-#   adapter_kind  snake_case kind; MUST equal the AdapterKind key in describe.xml
-#                 and ADAPTER_KIND in your *Adapter.java.
-#   entry_class   fully-qualified adapter class.
-#   name          display name; prose prefix "VCF Content Factory" (no brackets).
-#   version       semantic version of the pak.
-#   build_number  bump on every build; CHANGELOG.md gets a matching one-liner.
-#   tier          2 for Java SDK adapters.
-#   released      false while authoring; the official release is the .pak CI
-#                 builds on a v* git tag.
+#   adapter_kind  MUST equal the AdapterKind key in describe.xml and
+#                 ADAPTER_KIND in VsanPerfAdapter.java.
+#   build_number  bump on every build; CHANGELOG.md gets a matching line.
+#   released      false while authoring; the official release is the .pak
+#                 CI builds on a v* git tag.
 #
-# For a pak that bundles dashboards/views, add a bundled_content: block and
-# co-locate the YAML in this repo under views/ and dashboards/ (paths resolve
-# relative to this file).
-adapter_kind: example_adapter
-entry_class: com.vcfcf.adapters.example.ExampleAdapter
-name: VCF Content Factory Example Adapter
+# Design: factory knowledge/designs/vsanperf-mp-v1.md (Build 1).
+adapter_kind: vcfcf_vsanperf
+entry_class: com.vcfcf.adapters.vsanperf.VsanPerfAdapter
+name: VCF Content Factory vSAN Performance
 description: >
-  Minimal framework-v2 Tier 2 SDK adapter skeleton. Discovers one
-  ExampleResource kind under a World traversal anchor via collect-path
-  discovery, and pushes one metric and one property per resource. Copy this
-  repo and replace the example resource kinds, endpoints, and metric keys with
-  your target system.
+  vSAN Performance Service metrics for DOM client, DOM owner and vSAN
+  physical NICs, read over the vSphere JSON API (one wildcard query per
+  entity type per cluster, a bounded pool across clusters) and stitched
+  onto the vCenter adapter's own VMWARE HostSystem objects as instanced
+  keys under "vSAN Perf". Creates no objects besides its adapter instance.
+  Replaces the Python vsanhostmetrics pack at scale; distinct adapter kind,
+  so the two run side by side.
 version: 0.1.0
-build_number: 3
+build_number: 6
 tier: 2
 released: false
