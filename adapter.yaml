@@ -9,7 +9,8 @@
 # Design: factory knowledge/designs/vsanperf-mp-v1.md (Build 1) and
 # vsanperf-mp-v2.md (Build 2: host and cluster tiers from build 10, disk and
 # VM tiers from build 11) and vsanperf-mp-v3.md (Build 3: metric_scope, build
-# 19, version 1.2.0).
+# 19, version 1.2.0; its "1.2.1: Performance Service disabled" section, build 23,
+# version 1.2.1).
 adapter_kind: vcfcf_vsanperf
 entry_class: com.vcfcf.adapters.vsanperf.VsanPerfAdapter
 name: VCF Content Factory vSAN Performance
@@ -22,13 +23,30 @@ description: >
   VirtualMachine objects as keys under "vSAN Perf". Metric scope: dashboard
   (default, the 451 keys the Python pack's views use) or all (every metric
   of the 69 vSAN Performance Service entity types, 1,805 keys, no labels
-  filter). Creates no objects besides its adapter instance.
+  filter). A cluster whose vSAN Performance Service is disabled is skipped
+  and flagged ("vSAN Perf|Performance Service|enabled" = 0 on the cluster).
+  Creates no objects besides its adapter instance.
   Replaces the Python vsanhostmetrics pack at scale; distinct adapter kind,
   so the two run side by side.
-version: "1.2.0"
-build_number: 22
+version: "1.2.1"
+build_number: 24
 tier: 2
 released: false
+
+# 1.2.1 (design v3 "1.2.1"): the Performance Service disabled symptom, alert
+# and recommendation, on VMWARE ClusterComputeResource, keyed on the stitched
+# "vSAN Perf|Performance Service|enabled". Same shape as the synology pak.
+content_naming: factory_prefixed
+# The three target the vCenter adapter's own ClusterComputeResource, where
+# the pak stitches its key, not an object of this adapter kind.
+content_foreign_adapter_kinds: [VMWARE]
+bundled_content:
+  symptoms:
+    - symptoms/vsanperf_performance_service_disabled.yaml
+  alerts:
+    - alerts/vsanperf_performance_service_disabled.yaml
+  recommendations:
+    - recommendations/vsanperf_enable_performance_service.yaml
 
 # Where the keys land (factory #310, PR #321): docs-gen renders this as
 # "Metrics Pushed Onto" in docs/. Documentation only; the groups are the
@@ -117,6 +135,9 @@ stitch_targets:
       - "vSAN Perf|PMem|*"
       - "vSAN Perf|Remote DOM Client|*"
       - "vSAN Perf|Compute Remote DOM Client|*"
+      # 1.2.1: the pack's own key (VsanClusterGetConfig), every in-scope
+      # cluster, any tier setting and scope
+      - "vSAN Perf|Performance Service|*"
   - adapter_kind: VMWARE
     resource_kind: VirtualMachine
     identity: "VMEntityObjectID (VM MoRef, from config.instanceUuid in the cluster's VM read; remote HCI Mesh types only for VMs and disks of that read) + VMEntityVCID (vCenter about.instanceUuid)"

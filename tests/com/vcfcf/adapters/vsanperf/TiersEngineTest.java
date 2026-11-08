@@ -171,7 +171,7 @@ public final class TiersEngineTest {
         r = engine(vc, ops, new T.RecLog(), EntityType.ofTiers(EnumSet.of(EntityType.Tier.CORE)))
                 .run(in(60_000));
         T.eq(3, r.perfCalls, "both tiers off: Build 1");
-        T.eq(0, ops.clusterGets.get(), "no cluster list without the cluster tier");
+        T.eq(1, ops.clusterGets.get(), "1.2.1 D7: the cluster list without the cluster tier too");
     }
 
     /** The resolver: the same cluster MoRef in another vCenter is never matched. */

@@ -57,6 +57,11 @@ public final class ClientFakeServerTest {
         volatile boolean paged;
         volatile String perfMode = "ok"; // ok, expireOnce, alwaysNotAuth, fault, huge, slow, resetOnce
         volatile String release = "8.0.3.0";
+        /**
+         * 1.2.1: the VsanClusterGetConfig answer: a fixture file name, or
+         * "fault:<class>" for a fault body, or "junk".
+         */
+        volatile String configMode = "vsanclustergetconfig-enabled.json";
         /** A view fault whose faultstring names the view (real moId shape). */
         volatile boolean viewFaultNamesView;
 
@@ -159,6 +164,15 @@ public final class ClientFakeServerTest {
                 // ...then the chain's last page (no token): 12 VMs over two pages.
                 send(ex, 200, T.vendor("retrievepropertiesex-vm-cluster-light-max10-page5-2026-11-06.json"),
                         true);
+            } else if (path.endsWith("/vsan/VsanVcClusterConfigSystem/vsan-cluster-config-system/"
+                    + "VsanClusterGetConfig")) {
+                if (configMode.startsWith("fault:")) {
+                    fault(ex, configMode.substring(6), "A general system error occurred");
+                } else if (configMode.equals("junk")) {
+                    send(ex, 200, "<html>maintenance</html>", false);
+                } else {
+                    send(ex, 200, T.vendor(configMode), true);
+                }
             } else if (path.contains("/HostVsanSystem/") && path.endsWith("/QueryDisksForVsan")) {
                 send(ex, 200, T.vendor("querydisksforvsan-host-15151-2026-11-06.json"), true);
             } else if (path.endsWith("/RetrievePropertiesEx")
@@ -335,6 +349,7 @@ public final class ClientFakeServerTest {
         clusterTierCallAndEcho();
         vmReadTwoPages();
         queryDisksForVsan();
+        clusterGetConfig();
         truncatedStreamNotRetried();
         notGzipNotRetried();
         System.out.println("ClientFakeServerTest: all assertions passed");
@@ -420,6 +435,53 @@ public final class ClientFakeServerTest {
             T.eq("{}", q.body, "body");
             c.close();
         }
+    }
+
+    /**
+     * 1.2.1 (design D1): VsanClusterGetConfig over the JSON transport: path,
+     * body, the three config shapes (enabled and absent verbatim, false
+     * synthetic), and an unreadable answer or a fault thrown (unknown).
+     */
+    static void clusterGetConfig() throws Exception {
+        try (Server s = new Server()) {
+            VsanJsonClient c = client(s, 10_000, new T.RecLog());
+            T.eq(Boolean.TRUE, c.perfsvcEnabled("domain-c6004", 10_000), "enabled: true");
+            Req q = null;
+            for (Req r : s.reqs) if (r.path.endsWith("/VsanClusterGetConfig")) q = r;
+            T.eq("/sdk/vim25/8.0.3.0/vsan/VsanVcClusterConfigSystem/vsan-cluster-config-system/"
+                    + "VsanClusterGetConfig", q.path, "path");
+            T.eq("{\"cluster\":{\"_typeName\":\"ManagedObjectReference\",\"type\":"
+                    + "\"ClusterComputeResource\",\"value\":\"domain-c6004\"}}", q.body, "body");
+            T.check(q.session != null, "on the session");
+            s.configMode = "vsanclustergetconfig-absent.json";
+            T.eq(Boolean.FALSE, c.perfsvcEnabled("domain-c39146", 10_000), "absent: disabled");
+            s.configMode = "vsanclustergetconfig-false.json";
+            T.eq(Boolean.FALSE, c.perfsvcEnabled("domain-c39146", 10_000), "false: disabled");
+            s.configMode = "junk";
+            T.expect(Unreadable.class, () -> c.perfsvcEnabled("domain-c6004", 10_000),
+                    "an unreadable answer");
+            s.configMode = "fault:SystemError";
+            VsanFault f = T.expect(VsanFault.class, () -> c.perfsvcEnabled("domain-c6004", 10_000),
+                    "a fault");
+            T.eq("SystemError", f.faultClass, "fault class");
+            c.close();
+        }
+        // The parser alone, on the verbatim captures and the fault fixtures.
+        T.eq(true, VsanJsonClient.perfsvcEnabled(T.vendor("vsanclustergetconfig-enabled.json")),
+                "enabled");
+        T.eq(false, VsanJsonClient.perfsvcEnabled(T.vendor("vsanclustergetconfig-absent.json")),
+                "absent");
+        T.eq(false, VsanJsonClient.perfsvcEnabled(T.vendor("vsanclustergetconfig-false.json")),
+                "false");
+        T.expect(Unreadable.class, () -> VsanJsonClient.perfsvcEnabled("[]"), "an array");
+        VsanFault pfc = VsanFault.parse(T.vendor("queryperf-fault-systemerror-pfccountraw.json"), 500);
+        T.eq("vSphere fault SystemError: A general system error occurred: RuntimeError('no such "
+                + "column: pfcCountRaw. DB error code: 1, please check log file for details') "
+                + "(HTTP 500)", pfc.getMessage(), "the fault reads as the devel log line");
+        T.check(!pfc.isTypeUnavailable() && !pfc.isMasterNotFound() && !pfc.isBatchingFault(),
+                "a plain server fault");
+        VsanFault ka = VsanFault.parse(T.vendor("queryperf-fault-systemerror-kareset.json"), 500);
+        T.check(ka.getMessage().contains("no such column: kaReset."), "kaReset");
     }
 
     /** Build 11 review N2: a body that is not gzip is unreadable, not a transport failure. */

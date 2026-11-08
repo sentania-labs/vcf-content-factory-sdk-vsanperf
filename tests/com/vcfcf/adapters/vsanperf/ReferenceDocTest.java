@@ -16,7 +16,9 @@ import java.util.regex.Pattern;
  * from what the pack pushes: per row the stat key (group, instance template,
  * leaf), the vSAN label, the per-mille transform and the scope; per type
  * exactly its catalog under {@code all}, no row twice; all 69 types and
- * 1,805 keys documented.
+ * 1,805 keys documented. 1.2.1: the pack's own cluster key
+ * ({@link CycleEngine#PERFSVC_KEY}) is documented once, in its own section,
+ * with scope {@code both}.
  */
 public final class ReferenceDocTest {
 
@@ -25,6 +27,8 @@ public final class ReferenceDocTest {
                 StandardCharsets.UTF_8);
         Pattern heading = Pattern.compile("^### .*\\(`([A-Za-z0-9-]+)`\\)");
         EntityType cur = null;
+        boolean perfsvcSection = false;
+        int perfsvcRows = 0;
         Map<EntityType, Set<String>> seen = new HashMap<>();
         int rows = 0;
         for (String line : doc.split("\n")) {
@@ -33,7 +37,21 @@ public final class ReferenceDocTest {
                 cur = EntityType.byId(h.group(1));
                 continue;
             }
+            if (line.startsWith("## ")) {
+                cur = null;
+                perfsvcSection = line.contains("Performance Service");
+                continue;
+            }
             if (!line.startsWith("|`vSAN Perf")) continue;
+            if (perfsvcSection) {
+                String[] c = line.replace("\\|", "\u0000").split("\\|", -1);
+                T.eq(8, c.length, "Performance Service row: six columns: " + line);
+                T.eq(CycleEngine.PERFSVC_KEY, strip(c[1]).replace('\u0000', '|'),
+                        "the Performance Service key");
+                T.eq("both", c[6].trim(), "the Performance Service key's scope");
+                perfsvcRows++;
+                continue;
+            }
             T.check(cur != null, "key row outside a type section: " + line);
             EntityType t = cur;
             String[] c = line.replace("\\|", "\u0000").split("\\|", -1);
@@ -73,6 +91,7 @@ public final class ReferenceDocTest {
             T.eq(t.size(EntityType.Scope.ALL), s.size(), t.id + ": every catalog key documented");
         }
         T.eq(1805, rows, "REFERENCE.md documents 1,805 keys");
+        T.eq(1, perfsvcRows, "REFERENCE.md documents the Performance Service key once");
         System.out.println("ReferenceDocTest: all assertions passed");
     }
 

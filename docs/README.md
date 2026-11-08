@@ -102,6 +102,7 @@ This pak pushes keys onto resource kinds owned by other management packs, throug
 | `vSAN Perf\|PMem\|*` |
 | `vSAN Perf\|Remote DOM Client\|*` |
 | `vSAN Perf\|Compute Remote DOM Client\|*` |
+| `vSAN Perf\|Performance Service\|*` |
 
 ### VirtualMachine (VMWARE)
 
@@ -120,7 +121,7 @@ This pak pushes keys onto resource kinds owned by other management packs, throug
 ## Quick Reference
 
 - **Adapter kind:** `vcfcf_vsanperf`
-- **Version:** 0.0.0.22
+- **Version:** 0.0.0.24
 - **Traversal spec:** (none)
 - **Resource kinds:** 1
 - **Metrics pushed onto:** HostSystem (VMWARE), ClusterComputeResource (VMWARE), VirtualMachine (VMWARE) (see [Metrics Pushed Onto](#metrics-pushed-onto))

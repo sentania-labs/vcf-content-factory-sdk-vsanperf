@@ -114,7 +114,7 @@
       "x": 682,
       "y": 190,
       "width": 295,
-      "height": 344,
+      "height": 359,
       "angle": 0,
       "strokeColor": "#c2410c",
       "backgroundColor": "#fff7ed",
@@ -136,7 +136,7 @@
       "link": null,
       "locked": false,
       "label": {
-        "text": "ClusterComputeResource\n  VMWARE (external)\n  vSAN Perf|Capacity|*\n  vSAN Perf|DOM Client|*\n  vSAN Perf|DOM Comp Mgr|*\n  vSAN Perf|DOM Owner|*\n  vSAN Perf|ESA Dedup DOM Client|*\n  vSAN Perf|RDT Latency|*\n  vSAN Perf|ZDOM Top Stats|*\n  vSAN Perf|vSAN Direct Cluster|*\n  vSAN Perf|File Service|*\n  vSAN Perf|IOInsight|*\n  vSAN Perf|ESA Dedup DOM Comp Mgr|*\n  vSAN Perf|ESA Dedup DOM Owner|*\n  vSAN Perf|ESA Dedup Chunk Service|*\n  vSAN Perf|ESA Dedup Hash Service|*\n  vSAN Perf|Data Protection|*\n  vSAN Perf|Resync|*\n  vSAN Perf|PMem|*\n  vSAN Perf|Remote DOM Client|*\n  vSAN Perf|Compute Remote DOM Client|*",
+        "text": "ClusterComputeResource\n  VMWARE (external)\n  vSAN Perf|Capacity|*\n  vSAN Perf|DOM Client|*\n  vSAN Perf|DOM Comp Mgr|*\n  vSAN Perf|DOM Owner|*\n  vSAN Perf|ESA Dedup DOM Client|*\n  vSAN Perf|RDT Latency|*\n  vSAN Perf|ZDOM Top Stats|*\n  vSAN Perf|vSAN Direct Cluster|*\n  vSAN Perf|File Service|*\n  vSAN Perf|IOInsight|*\n  vSAN Perf|ESA Dedup DOM Comp Mgr|*\n  vSAN Perf|ESA Dedup DOM Owner|*\n  vSAN Perf|ESA Dedup Chunk Service|*\n  vSAN Perf|ESA Dedup Hash Service|*\n  vSAN Perf|Data Protection|*\n  vSAN Perf|Resync|*\n  vSAN Perf|PMem|*\n  vSAN Perf|Remote DOM Client|*\n  vSAN Perf|Compute Remote DOM Client|*\n  vSAN Perf|Performance Service|*",
         "fontSize": 13,
         "fontFamily": 1,
         "textAlign": "center",

@@ -34,12 +34,15 @@ import java.util.function.LongSupplier;
  *   session + about (instanceUuid)         caller thread
  *   inventory: clusters, hosts, node uuids  caller thread, one read
  *   Ops host map (every 12th cycle, host set change, MoRef miss)
- *   Ops cluster map, cluster tier on (every 12th cycle, cluster set change,
- *       a MoRef miss at most once per 12 cycles)
+ *   Ops cluster map, whenever a cluster is in scope (1.2.1 D7; every 12th
+ *       cycle, cluster set change, a MoRef miss at most once per 12 cycles)
  *   Ops VM map, VM tier on, on cycles with a VM run (every 12th cycle,
  *       a VM read that changed a VM set, a MoRef miss at most once per 12)
  *   one task per in-scope cluster -> bounded pool (N workers)
- *       task: the types in scope, serially: core (host-domowner,
+ *       task: VsanClusterGetConfig first (1.2.1 D1; not a perf call): the
+ *             Performance Service disabled ends the task (no perf call, no
+ *             disk or VM read); enabled or unknown goes on:
+ *             the types in scope, serially: core (host-domowner,
  *             host-domclient, vsan-pnic-net), cluster, host, disk tier,
  *             and the VM tier on the cluster's VM cycle; the disk map and
  *             VM read lazily before the first type that needs them; VM
@@ -83,6 +86,18 @@ final class CycleEngine {
 
         PerfCall queryPerf(String clusterMoid, EntityType type, long startMs, long endMs,
                 long timeoutMs) throws IOException, InterruptedException;
+
+        /**
+         * 1.2.1 (design D1): {@code VsanClusterGetConfig} on one cluster:
+         * {@code TRUE} iff {@code perfsvcConfig.enabled == true},
+         * {@code FALSE} when the key is absent or false. Throws when the call
+         * fails or the body is unreadable (the engine reads that as unknown).
+         * The default, {@code null}, is unknown too: fakes that model 1.2.0.
+         */
+        default Boolean perfsvcEnabled(String clusterMoid, long timeoutMs)
+                throws IOException, InterruptedException {
+            return null;
+        }
 
         /**
          * Build 19: the query under a metric scope ({@code all}: no labels
@@ -202,6 +217,12 @@ final class CycleEngine {
     /** Landing-type WARN period per type (v2 "Runtime landing"): once a day. */
     static final long LANDING_WARN_MS = 24L * 60 * 60 * 1000;
     private static final int TIERS = EntityType.Tier.values().length;
+    /**
+     * 1.2.1 (design D4): the cluster's Performance Service state, 1 enabled,
+     * 0 disabled, pushed every cycle the config read was definite, on every
+     * in-scope ClusterComputeResource whatever {@code tier_cluster} says.
+     */
+    static final String PERFSVC_KEY = EntityType.ROOT + "|Performance Service|enabled";
     /** Push when the buffer holds this many resources... */
     static final int PUSH_RESOURCES = 100;
     /** ...or about this many bytes of JSON. */
@@ -353,6 +374,17 @@ final class CycleEngine {
     /** Build 22: the drain after Stop Collecting is running (caller thread). */
     private boolean stopDrain;
     private final Set<String> skipInfoLogged = new HashSet<>();
+    /**
+     * 1.2.1 (design D2): the last definite Performance Service state per
+     * cluster (caller thread); an unknown read leaves it as it was.
+     */
+    private final Map<String, Boolean> perfsvcState = new HashMap<>();
+    /** Clusters this cycle found with the Performance Service disabled (caller thread). */
+    private final Set<String> cycleDisabled = new HashSet<>();
+    /** Sample time of this cycle's Performance Service state values. */
+    private long stateTs;
+    /** 1.2.1: clusters whose config read failed, warned since the last host map refresh. */
+    private final Set<String> configWarned = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final Set<String> uuidWarned = new HashSet<>();
 
     CycleEngine(VcenterApi vc, OpsApi ops, Settings settings, Log log, LongSupplier clockMs) {
@@ -368,7 +400,7 @@ final class CycleEngine {
     // Result
     // ------------------------------------------------------------------
 
-    /** The seventeen self-metrics, and why the cycle failed ({@code null}: it did not). */
+    /** The nineteen self-metrics, and why the cycle failed ({@code null}: it did not). */
     static final class Result {
         int clustersInScope;
         int clustersOk;
@@ -411,6 +443,12 @@ final class CycleEngine {
         int vdisksUnresolved;
         /** Review W1: failed calls of optional (non-core) types; the cluster still succeeds. */
         int optionalCallsFailed;
+        /** 1.2.1 (design D8): server faults of core types; the cluster still succeeds. */
+        int requiredCallsFailed;
+        /** 1.2.1 (design D2): clusters skipped because their Performance Service is disabled. */
+        int clustersPerfsvcDisabled;
+        /** Build 24 (N3): Performance Service state values pushed (in series_pushed, no tier). */
+        int stateSeriesPushed;
         /** Max time a worker waited for the one VM-call permit (PERF pool). */
         long vmPermitWaitMaxMs;
         // Per tier (index = EntityType.Tier ordinal), for PERF tier and the summary.
@@ -447,6 +485,8 @@ final class CycleEngine {
             m.put("Collection|vms_unresolved", (double) vmsUnresolved);
             m.put("Collection|vdisks_unresolved", (double) vdisksUnresolved);
             m.put("Collection|optional_calls_failed", (double) optionalCallsFailed);
+            m.put("Collection|clusters_perfsvc_disabled", (double) clustersPerfsvcDisabled);
+            m.put("Collection|required_calls_failed", (double) requiredCallsFailed);
             return m;
         }
 
@@ -542,7 +582,12 @@ final class CycleEngine {
         }
     }
 
-    enum Outcome { OK, FAILED, TIMED_OUT }
+    /**
+     * How a cluster's task ended. {@code DISABLED} (1.2.1, design D2): its
+     * Performance Service is off, no perf call was made; neither OK, failed
+     * nor timed out, and it does not move the rotation.
+     */
+    enum Outcome { OK, FAILED, TIMED_OUT, DISABLED }
 
     private static final class ClusterDone extends Msg {
         final Outcome outcome;
@@ -552,8 +597,12 @@ final class CycleEngine {
         final int[] tierCalls;
         final long[] tierCallMs;
         final int[] tierSkips;
-        final List<OptionalFailure> optional;
+        final List<TypeFailure> optional;
         final boolean vmRun;
+        /** 1.2.1: the config read, {@code null} when unknown. */
+        Boolean perfsvc;
+        /** Build 24: OK with zero perf calls, every type learned-skipped. */
+        boolean allSkipped;
         final long wallMs;
         /** Clock time the cluster's task ended (build 20: a cut is a TIMED_OUT end at or after the deadline). */
         long endedAt;
@@ -564,7 +613,7 @@ final class CycleEngine {
 
         ClusterDone(Inventory.Cluster c, Outcome outcome, int calls, long callMs, long wallMs,
                 String warn, String fatal, Error fatalError, int[] tierCalls, long[] tierCallMs,
-                int[] tierSkips, List<OptionalFailure> optional, boolean vmRun) {
+                int[] tierSkips, List<TypeFailure> optional, boolean vmRun) {
             super(c);
             this.optional = optional;
             this.vmRun = vmRun;
@@ -624,6 +673,7 @@ final class CycleEngine {
                 clusterState.clear();
                 marks.clear();
                 learned.clear();
+                perfsvcState.clear();
             }
             vcUuid = uuid;
             if (ops == null) {
@@ -669,6 +719,7 @@ final class CycleEngine {
                     optionalWarned.clear();
                     unresolvedDiskWarned.clear();
                     remoteWarned.clear();
+                    configWarned.clear();
                     log.info("Ops host map: " + m);
                     perf("PERF inventory cycle=" + id + " read=ops_resources ms="
                             + (clock.getAsLong() - to) + " count=" + m.size());
@@ -690,8 +741,10 @@ final class CycleEngine {
                 return res;
             }
 
-            // Step 2b: Ops ClusterComputeResource map (cluster tier).
-            if (settings.has(EntityType.Tier.CLUSTER)) refreshClusterMap(id, uuid, scope, res);
+            // Step 2b: Ops ClusterComputeResource map. 1.2.1 (design D7): read
+            // whenever a cluster is in scope, not only with the cluster tier,
+            // so the Performance Service state lands with tier_cluster off.
+            refreshClusterMap(id, uuid, scope, res);
             // Step 2c: Ops VirtualMachine map, on cycles where some cluster runs its VM types.
             if (settings.has(EntityType.Tier.VM)) {
                 boolean anyVmRun = false;
@@ -707,7 +760,11 @@ final class CycleEngine {
                 }
                 res.perfCallMsAvg = (double) res.perfCallMsTotal / res.perfCalls;
             }
-            if (res.failure == null && res.clustersFailed == res.clustersInScope) {
+            // 1.2.1: a cluster with the Performance Service disabled is not
+            // collectible; every collectible cluster failing fails the cycle,
+            // none being collectible does not.
+            int collectible = res.clustersInScope - res.clustersPerfsvcDisabled;
+            if (res.failure == null && collectible > 0 && res.clustersFailed == collectible) {
                 res.failure = "every vSAN cluster in scope failed (" + res.clustersFailed
                         + "); first: " + res.lastError;
             }
@@ -740,15 +797,18 @@ final class CycleEngine {
             if (res.failure != null) res.error(res.failure);
             log.info("cycle " + id + " summary: clusters ok=" + res.clustersOk + " failed="
                     + res.clustersFailed + " timed_out=" + res.clustersTimedOut
-                    + (res.clustersStopped > 0 ? " stopped=" + res.clustersStopped : "") + " of "
+                    + (res.clustersStopped > 0 ? " stopped=" + res.clustersStopped : "")
+                    + " perfsvc_disabled=" + res.clustersPerfsvcDisabled + " of "
                     + res.clustersInScope + "; perf calls=" + res.perfCalls + "; series pushed="
-                    + res.seriesPushed + " (" + byTier(res.tierSeriesPushed) + "; "
+                    + res.seriesPushed + " (" + byTier(res.tierSeriesPushed)
+                    + (res.stateSeriesPushed > 0 ? " state " + res.stateSeriesPushed : "") + "; "
                     + res.duplicatesSkipped + " already pushed); unresolved hosts="
                     + res.hostsUnresolved + " clusters=" + res.clustersUnresolved
                     + (settings.has(EntityType.Tier.DISK) ? " disks=" + res.disksUnresolved : "")
                     + (settings.has(EntityType.Tier.VM) ? " vms=" + res.vmsUnresolved
                             + " vdisks=" + res.vdisksUnresolved : "")
                     + "; unparsed=" + res.entitiesUnparsed + "; learned skips=" + res.learnedSkips
+                    + "; required calls failed=" + res.requiredCallsFailed
                     + "; optional calls failed=" + res.optionalCallsFailed
                     + "; push batches ok="
                     + res.pushBatchesOk + " failed=" + res.pushBatchesFailed + "; scope="
@@ -820,7 +880,7 @@ final class CycleEngine {
             opsClustersRetry = true;
             log.warn("the VCF Operations ClusterComputeResource list could not be read ("
                     + e.getMessage() + "); " + (opsClusters == null
-                            ? "cluster tier data is not pushed this cycle"
+                            ? "cluster-side data (cluster tier keys, Performance Service state) is not pushed this cycle"
                             : "keeping the previous map this cycle"));
             res.error("ClusterComputeResource list read failed");
         }
@@ -888,6 +948,7 @@ final class CycleEngine {
     private Plan plan(Inventory.Cluster c) {
         ClusterState st = clusterState.computeIfAbsent(c.moid, k -> new ClusterState());
         Plan p = new Plan();
+        p.perfsvcWasDisabled = Boolean.FALSE.equals(perfsvcState.get(c.moid));
         if (settings.has(EntityType.Tier.DISK)) {
             Set<String> hostSet = new TreeSet<>();
             for (Inventory.Host h : c.hosts) hostSet.add(h.moid);
@@ -1008,10 +1069,11 @@ final class CycleEngine {
         int maxDepth = 0;
         long windowEnd = clock.getAsLong();
         long windowStart = windowEnd - WINDOW_MS;
+        stateTs = windowEnd;
+        cycleDisabled.clear();
         ExecutorService pool = Executors.newFixedThreadPool(workers, threads(id));
         Map<String, Future<?>> futures = new LinkedHashMap<>();
         long submitAt = clock.getAsLong();
-        AtomicInteger furthestStarted = new AtomicInteger(-1);
         Set<Integer> startedBefore = java.util.concurrent.ConcurrentHashMap.newKeySet();
         cycleSettled.clear();
         cycleDeadlineMs = deadlineMs;
@@ -1029,10 +1091,7 @@ final class CycleEngine {
                 // attempted let the rotation reach the end of the list every
                 // overloaded cycle, so the same clusters completed each cycle
                 // and the rest never did. Only a start before the deadline counts.
-                if (clock.getAsLong() < deadlineMs) {
-                    furthestStarted.accumulateAndGet(position, Math::max);
-                    startedBefore.add(position);
-                }
+                if (clock.getAsLong() < deadlineMs) startedBefore.add(position);
                 int now = inFlight.incrementAndGet();
                 maxInFlight.accumulateAndGet(now, Math::max);
                 try {
@@ -1097,8 +1156,13 @@ final class CycleEngine {
             }
         }
         // The next cycle starts after the furthest cluster attempted here,
-        // completed, failed, timed out or cut.
-        int furthest = furthestStarted.get();
+        // completed, failed, timed out or cut. 1.2.1 (design D2): a cluster
+        // with the Performance Service disabled made no perf call and does
+        // not move the rotation.
+        int furthest = -1;
+        for (int p : startedBefore) {
+            if (!cycleDisabled.contains(scope.get(p).moid)) furthest = Math.max(furthest, p);
+        }
         if (furthest >= 0) lastAttempted = scope.get(furthest).moid;
         List<String> order = new ArrayList<>(scope.size());
         for (Inventory.Cluster c : scope) order.add(c.moid);
@@ -1273,16 +1337,34 @@ final class CycleEngine {
         ClusterDone d = (ClusterDone) m;
         if (!done.add(d.cluster.moid)) return 0;
         res.perfCalls += d.calls;
-        for (OptionalFailure f : d.optional) {
-            // Review W1: counted per tier, WARN once per (cluster, type) per
-            // refresh, last_error; the cluster and the cycle still succeed.
-            res.optionalCallsFailed++;
+        perfsvcDone(id, d, buf, res, clusterIds, pushMs);
+        if (d.allSkipped) {
+            // Build 24 (review B1): OK, but nothing was asked; say so.
+            res.error("cluster " + d.cluster.moid + ": all types learned-skipped; no perf call "
+                    + "this cycle");
+            if (optionalWarned.add(d.cluster.moid + "\u0000*all-skipped*")) {
+                log.warn("cluster " + d.cluster.moid + " (" + d.cluster.name + "): every type in "
+                        + "scope is learned-skipped (empty or faulting); no perf call this cycle, "
+                        + "each is re-probed after about 24 h (not repeated until the next "
+                        + "refresh)");
+            }
+        }
+        for (TypeFailure f : d.optional) {
+            // Review W1, 1.2.1 D8: counted per tier, WARN once per (cluster,
+            // type) per refresh, last_error; the cluster and the cycle still
+            // succeed. A core type's fault counts in required_calls_failed.
+            if (f.required) res.requiredCallsFailed++;
+            else res.optionalCallsFailed++;
             res.tierFailed[f.type.tier.ordinal()]++;
             res.error("cluster " + d.cluster.moid + ": " + f.message);
             if (optionalWarned.add(d.cluster.moid + '\u0000' + f.type.id)) {
                 log.warn("cluster " + d.cluster.moid + " (" + d.cluster.name + "): " + f.message
-                        + " (an optional " + f.type.tier.label + "-tier type; the cluster's "
-                        + "other data is still pushed; not repeated until the next refresh)");
+                        + (f.required ? " (a core type; the cluster's other data is still "
+                                + "pushed; skipped there for about 24 h after "
+                                + LearnedTypes.FAULT_STRIKES + " faulting cycles in a row; "
+                                : " (an optional " + f.type.tier.label + "-tier type; the "
+                                        + "cluster's other data is still pushed; ")
+                        + "not repeated until the next refresh)");
             }
         }
         for (int i = 0; i < TIERS; i++) {
@@ -1295,6 +1377,7 @@ final class CycleEngine {
         switch (d.outcome) {
             case OK: res.clustersOk++; break;
             case FAILED: res.clustersFailed++; break;
+            case DISABLED: res.clustersPerfsvcDisabled++; break;
             default:
                 if (stopDrain) res.clustersStopped++;
                 else res.clustersTimedOut++;
@@ -1316,6 +1399,41 @@ final class CycleEngine {
                 + " wall_ms=" + d.wallMs
                 + " result=" + d.outcome.name().toLowerCase(java.util.Locale.ROOT));
         return d.callMs;
+    }
+
+    /**
+     * 1.2.1 (designs D2, D4): one cluster's config read, on the caller
+     * thread. A definite state is pushed as {@link #PERFSVC_KEY} on the
+     * cluster's ClusterComputeResource (no dedup mark: one value every
+     * cycle, at the cycle's time); a cluster with no Ops object counts in
+     * clusters_unresolved. INFO on a change only. A disabled cluster's disk
+     * and VM read state is dropped, so its first enabled cycle reads both
+     * again.
+     */
+    private void perfsvcDone(long id, ClusterDone d, PushBuffer buf, Result res, Ids clusterIds,
+            long[] pushMs) {
+        String moid = d.cluster.moid;
+        if (d.outcome == Outcome.DISABLED) {
+            cycleDisabled.add(moid);
+            clusterState.remove(moid);
+        }
+        if (d.perfsvc == null) return;
+        Boolean before = perfsvcState.put(moid, d.perfsvc);
+        if (!d.perfsvc && !Boolean.FALSE.equals(before)) {
+            log.info("Performance Service disabled on " + moid + " (" + d.cluster.name
+                    + "); perf collection skipped");
+        } else if (d.perfsvc && Boolean.FALSE.equals(before)) {
+            log.info("Performance Service enabled on " + moid + " (" + d.cluster.name
+                    + "); collecting");
+        }
+        String rid = opsClusters == null ? null : opsClusters.resourceId(moid);
+        if (rid == null) {
+            clusterIds.missedMoids.add(moid);
+            return;
+        }
+        PushBuffer.Group g = buf.add(OpsHostMap.CLUSTER, rid, PERFSVC_KEY, stateTs,
+                d.perfsvc ? 1.0 : 0.0, null);
+        if (g.full()) pushGroup(id, buf, OpsHostMap.CLUSTER, stateTs, res, pushMs);
     }
 
     /**
@@ -1383,12 +1501,14 @@ final class CycleEngine {
                 // Review N2: the list read failed; that is the reason, not the adapter.
                 log.warn(ids.missedMoids.size() + " cluster(s) could not be matched because the "
                         + "VCF Operations ClusterComputeResource list could not be read; their "
-                        + "cluster tier data is not pushed this cycle");
+                        + "cluster-side data is not pushed this cycle");
             } else {
                 log.warn(ids.missedMoids.size() + " cluster(s) have no VMWARE "
                         + "ClusterComputeResource object of this vCenter in VCF Operations (is "
-                        + "the vCenter adapter collecting them?); their cluster tier data is not "
-                        + "pushed (first: " + ids.missedMoids.iterator().next() + ")");
+                        + "the vCenter adapter collecting them?); their cluster-side data (the "
+                        + "Performance Service state" + (settings.has(EntityType.Tier.CLUSTER)
+                                ? " and the cluster tier keys" : "") + ") is not pushed (first: "
+                        + ids.missedMoids.iterator().next() + ")");
             }
         }
     }
@@ -1525,6 +1645,8 @@ final class CycleEngine {
      * inventory snapshots with whether to re-read them this cycle.
      */
     static final class Plan {
+        /** 1.2.1: the last definite config read found the Performance Service disabled. */
+        boolean perfsvcWasDisabled;
         boolean vmRun;
         Map<String, String> disks;
         String diskTrigger;
@@ -1534,14 +1656,21 @@ final class CycleEngine {
         OpsHostMap opsVms;
     }
 
-    /** An optional-type call failure (W1): not a cluster failure. */
-    private static final class OptionalFailure {
+    /**
+     * A type's call failure that is not a cluster failure: an optional type
+     * (review W1), or since 1.2.1 (design D8) a server fault on any type,
+     * core ones included ({@code required}).
+     */
+    private static final class TypeFailure {
         final EntityType type;
         final String message;
+        /** A core type: counted in required_calls_failed, else optional_calls_failed. */
+        final boolean required;
 
-        OptionalFailure(EntityType type, String message) {
+        TypeFailure(EntityType type, String message) {
             this.type = type;
             this.message = message;
+            this.required = type.tier == EntityType.Tier.CORE;
         }
     }
 
@@ -1582,8 +1711,12 @@ final class CycleEngine {
         int[] tierCalls = new int[TIERS];
         long[] tierCallMs = new long[TIERS];
         int[] tierSkips = new int[TIERS];
-        List<OptionalFailure> optional = new ArrayList<>();
+        List<TypeFailure> optional = new ArrayList<>();
+        /** Build 24 (B1): type faults of this cycle, struck only if the cluster ends OK. */
+        Map<EntityType, String> pendingStrikes = new LinkedHashMap<>();
         Outcome outcome = Outcome.OK;
+        Boolean perfsvc = null;
+        boolean allSkipped = false;
         String warn = null;
         String fatal = null;
         Error fatalError = null;
@@ -1596,6 +1729,19 @@ final class CycleEngine {
         // map unproven for this run, so virtual-disk is not collected on it.
         boolean vmReadFailed = false;
         try {
+            // 1.2.1 (design D1): the Performance Service state first. Not a
+            // perf call (not in perf_calls, the call rate or the latency).
+            perfsvc = readPerfsvc(id, c, deadlineMs);
+            if (Boolean.FALSE.equals(perfsvc)) {
+                // Design D2: no perf call, no disk map or VM read; not OK,
+                // failed or timed out; no last_error.
+                outcome = Outcome.DISABLED;
+                return;
+            }
+            if (Boolean.TRUE.equals(perfsvc) && plan.perfsvcWasDisabled) {
+                // Turned back on: re-probe every type on its first enabled cycle.
+                learned.clearCluster(c.moid);
+            }
             for (EntityType type : settings.types) {
                 if (Thread.currentThread().isInterrupted()) {
                     outcome = Outcome.TIMED_OUT;
@@ -1662,6 +1808,7 @@ final class CycleEngine {
                 int status = 0;
                 boolean stop = false;
                 boolean strike = false;
+                boolean keepStrikes = false;
                 try {
                     pc = vc.queryPerf(c.moid, type, settings.scope, windowStart, windowEnd,
                             budget);
@@ -1683,36 +1830,39 @@ final class CycleEngine {
                             }
                         } else if (type.faultStrikes) {
                             // v3 Q5: an optional type; learned after three in a row.
-                            strike = true;
+                            strike = typeFault(type, f.faultClass, type.id + ": "
+                                    + f.getMessage(), optional, pendingStrikes);
                             failedCalls++;
-                            optional.add(new OptionalFailure(type, type.id + ": "
-                                    + f.getMessage()));
-                            if (learned.strike(c.moid, type, clock.getAsLong())) {
-                                log.info("cluster " + c.moid + ": " + type.id + " faulted ("
-                                        + f.faultClass + ") " + LearnedTypes.FAULT_STRIKES
-                                        + (type.tier == EntityType.Tier.VM ? " VM runs"
-                                                : " cycles") + " in a row; not queried there "
-                                        + "for about 24 h");
-                            }
                         } else if (learned.learn(c.moid, type, clock.getAsLong())) {
                             log.info("cluster " + c.moid + " does not offer " + type.id + " ("
                                     + f.faultClass + "); not queried there for about 24 h");
                         }
-                    } else {
+                    } else if (f.is(VsanFault.MANAGED_OBJECT_NOT_FOUND)
+                            || f.isMasterNotFound() || f.isBatchingFault()) {
+                        // Cluster failures, never learned: the cluster's MoRef is
+                        // gone (the rest is abandoned); no stats primary on a
+                        // cluster read as enabled or unknown (design D3); a
+                        // batching fault, a defect in this pack.
                         if (f.isBatchingFault()) {
                             log.error("cluster " + c.moid + " " + type.id + ": query batching "
                                     + "fault " + f.firstKey() + " (a defect in this pack)");
                         }
                         failedCalls++;
-                        String msg = type.id + ": " + f.getMessage();
-                        if (type.tier == EntityType.Tier.CORE
-                                || f.is(VsanFault.MANAGED_OBJECT_NOT_FOUND)) {
-                            outcome = Outcome.FAILED;
-                            warn = first(warn, msg);
-                            if (f.is(VsanFault.MANAGED_OBJECT_NOT_FOUND)) stop = true;
-                        } else {
-                            optional.add(new OptionalFailure(type, msg));
+                        outcome = Outcome.FAILED;
+                        warn = first(warn, type.id + ": " + f.getMessage());
+                        // Build 24 (review N2): masternotfound is cluster-wide;
+                        // every further call would fault the same way.
+                        if (f.is(VsanFault.MANAGED_OBJECT_NOT_FOUND) || f.isMasterNotFound()) {
+                            stop = true;
                         }
+                    } else {
+                        // 1.2.1 (design D8 as amended for build 24): any other
+                        // parsed vSphere fault stays with its type, core ones
+                        // included; its strike is committed at the end of the
+                        // task, only if the cluster ends OK.
+                        strike = typeFault(type, f.faultClass, type.id + ": "
+                                + f.getMessage(), optional, pendingStrikes);
+                        failedCalls++;
                     }
                 } catch (HttpTimeoutException e) {
                     faultKey = "timeout";
@@ -1723,7 +1873,24 @@ final class CycleEngine {
                     outcome = Outcome.TIMED_OUT;
                     Thread.currentThread().interrupt();
                     stop = true;
-                } catch (IOException | RuntimeException e) {
+                } catch (IOException e) {
+                    // Build 24 (review B1, D8 amended): no parsed vSphere fault
+                    // (an HTTP status without a fault body, a reset, a read
+                    // error, an over-cap or unreadable answer) is not a type
+                    // fault. 1.2.0 handling: a core type fails the cluster, an
+                    // optional one is counted; no strike is added or reset.
+                    faultKey = e.getClass().getSimpleName();
+                    keepStrikes = true;
+                    failedCalls++;
+                    String msg = type.id + ": " + e.getMessage();
+                    if (type.tier == EntityType.Tier.CORE) {
+                        outcome = Outcome.FAILED;
+                        warn = first(warn, msg);
+                    } else {
+                        optional.add(new TypeFailure(type, msg));
+                    }
+                } catch (RuntimeException e) {
+                    // A defect, not the server: a core type fails the cluster.
                     faultKey = e.getClass().getSimpleName();
                     failedCalls++;
                     String msg = type.id + ": " + e.getMessage();
@@ -1731,7 +1898,7 @@ final class CycleEngine {
                         outcome = Outcome.FAILED;
                         warn = first(warn, msg);
                     } else {
-                        optional.add(new OptionalFailure(type, msg));
+                        optional.add(new TypeFailure(type, msg));
                     }
                 } finally {
                     if (permit) vmPermit.release();
@@ -1741,7 +1908,7 @@ final class CycleEngine {
                     callMs += ms;
                     tierCallMs[type.tier.ordinal()] += ms;
                     if (pc == null) learned.answered(c.moid, type);
-                    if (!strike) learned.noStrike(c.moid, type);
+                    if (!strike && !keepStrikes) learned.noStrike(c.moid, type);
                     perf("PERF call cycle=" + id + " cluster=" + c.moid + " type=" + type.id
                             + " tier=" + type.tier.label + " parse=stream worker=" + worker
                             + " queue_wait_ms=" + queueWaitMs + " wall_ms=" + ms + " status="
@@ -1773,11 +1940,19 @@ final class CycleEngine {
                     }
                 }
             }
-            // Review W1: a cluster fails on a core failure, or when every call failed.
-            if (outcome == Outcome.OK && calls > 0 && failedCalls == calls) {
+            // Review W1: a cluster fails when every perf call it made failed
+            // (the config read is not one; no call at all is OK).
+            if (outcome == Outcome.OK && calls > 0 && failedCalls == calls
+                    && !optional.isEmpty()) {
                 outcome = Outcome.FAILED;
                 warn = first(warn, "every call failed; first: " + optional.get(0).message);
                 optional.clear();
+            }
+            // Build 24 (B1 part 3): nothing called because every type is learned.
+            if (outcome == Outcome.OK && calls == 0) {
+                int skips = 0;
+                for (int n : tierSkips) skips += n;
+                allSkipped = skips > 0;
             }
         } catch (InterruptedException e) {
             // Cancelled at the deadline or by Stop Collecting while waiting for
@@ -1800,15 +1975,84 @@ final class CycleEngine {
             outcome = Outcome.FAILED;
             warn = first(warn, "internal error (" + t.getClass().getSimpleName() + ")");
         } finally {
+            // Build 24 (B1): strikes count only on a cluster that ended OK with
+            // at least one call answered; otherwise the faults were not the
+            // types' own, and their counts start over.
+            boolean commit = outcome == Outcome.OK && calls > failedCalls;
+            for (Map.Entry<EntityType, String> ps : pendingStrikes.entrySet()) {
+                EntityType t = ps.getKey();
+                if (!commit) {
+                    learned.noStrike(c.moid, t);
+                } else if (learned.strike(c.moid, t, clock.getAsLong())) {
+                    log.info("cluster " + c.moid + ": " + t.id + " faulted (" + ps.getValue()
+                            + ") " + LearnedTypes.FAULT_STRIKES + (t.tier == EntityType.Tier.VM
+                                    ? " VM runs" : " cycles") + " in a row; not queried there "
+                            + "for about 24 h");
+                }
+            }
             long ended = clock.getAsLong();
             ClusterDone d = new ClusterDone(c, outcome, calls, callMs, ended - t0,
                     warn, fatal, fatalError, tierCalls, tierCallMs, tierSkips, optional,
                     plan.vmRun);
             d.endedAt = ended;
+            d.perfsvc = perfsvc;
+            d.allSkipped = allSkipped;
             if (!put(queue, d, deadlineMs) && fatalError != null) {
                 queue.offer(d);
             }
         }
+    }
+
+    /**
+     * 1.2.1 (design D1): the cluster's Performance Service state, under the
+     * per-call timeout and the cycle deadline. {@code null} (unknown) when
+     * the deadline is spent, the call fails or the body is unreadable; the
+     * cluster then runs as in 1.2.0 and no state is pushed. WARN once per
+     * cluster per host map refresh. An interrupt (deadline cut, Stop
+     * Collecting) propagates.
+     */
+    private Boolean readPerfsvc(long id, Inventory.Cluster c, long deadlineMs)
+            throws InterruptedException {
+        long left = deadlineMs - clock.getAsLong();
+        if (left <= 0) return null;
+        long t0 = clock.getAsLong();
+        Boolean state = null;
+        String fault = "-";
+        try {
+            state = vc.perfsvcEnabled(c.moid, Math.max(1, Math.min(settings.callTimeoutMs, left)));
+        } catch (IOException | RuntimeException e) {
+            fault = e instanceof VsanFault ? ((VsanFault) e).faultClass
+                    : e.getClass().getSimpleName();
+            if (configWarned.add(c.moid)) {
+                log.warn("cluster " + c.moid + " (" + c.name + "): VsanClusterGetConfig failed ("
+                        + fault + "); Performance Service state unknown, collected as before "
+                        + "(not repeated until the next refresh)");
+            }
+        }
+        perf("PERF perfsvc cycle=" + id + " cluster=" + c.moid + " ms="
+                + (clock.getAsLong() - t0) + " state="
+                + (state == null ? "unknown" : state ? "enabled" : "disabled") + " fault=" + fault);
+        return state;
+    }
+
+    /**
+     * 1.2.1 (design D8, amended for build 24): a parsed vSphere fault on one
+     * type. Counted (core types in required_calls_failed) and named in
+     * last_error now; its strike is recorded in {@code pending} and committed
+     * at the end of the cluster task only if the cluster ends OK with at
+     * least one call answered. After {@link LearnedTypes#FAULT_STRIKES}
+     * committed strikes in a row (VM types: VM runs) the type is skipped on
+     * that cluster for about 24 h, INFO once. {@code ioinsight} is never
+     * learned.
+     *
+     * @return whether a strike is pending (the count is not reset after the call)
+     */
+    private static boolean typeFault(EntityType type, String faultClass, String message,
+            List<TypeFailure> failures, Map<EntityType, String> pending) {
+        failures.add(new TypeFailure(type, message));
+        if (LearnedTypes.exempt(type)) return false;
+        pending.put(type, faultClass);
+        return true;
     }
 
     /**
@@ -2084,6 +2328,8 @@ final class CycleEngine {
         static final class Group {
             final Map<String, Map<String, Double>> byResource = new LinkedHashMap<>();
             final int[] byTier = new int[TIERS];
+            /** Build 24 (N3): Performance Service state values in this group. */
+            int state;
             /** This group's dedup marks; committed if its push is clean (build 15). */
             final Watermarks.Pending pending;
             long bytes;
@@ -2117,7 +2363,9 @@ final class CycleEngine {
             g.byResource.computeIfAbsent(rid, k -> new LinkedHashMap<>()).put(key, v);
             g.bytes += key.length() + 48;
             g.values++;
-            g.byTier[tier.ordinal()]++;
+            // 1.2.1: the Performance Service state belongs to no tier.
+            if (tier != null) g.byTier[tier.ordinal()]++;
+            else g.state++;
             return g;
         }
     }
@@ -2149,6 +2397,7 @@ final class CycleEngine {
             buf.failed.add(g.pending);
         }
         for (int i = 0; i < TIERS; i++) res.tierSeriesPushed[i] += g.byTier[i];
+        res.stateSeriesPushed += g.state;
         res.pushBatchesOk += o.batchesOk;
         res.pushBatchesFailed += o.batchesFailed;
         if (!o.clean) {
@@ -2221,5 +2470,20 @@ final class CycleEngine {
 
     boolean opsRefreshPending() {
         return opsRefreshForced;
+    }
+
+    /** The rotation's last attempted cluster (tests). */
+    String lastAttempted() {
+        return lastAttempted;
+    }
+
+    /** The cluster the next cycle starts at, or {@code null} (tests). */
+    String restartAt() {
+        return restartAt;
+    }
+
+    /** Clusters the previous cycle cut unfinished (tests). */
+    Set<String> cutLastCycle() {
+        return cutLastCycle;
     }
 }

@@ -1,0 +1,4 @@
+{
+    "_typeName": "SystemError", 
+    "faultstring": "A general system error occurred: RuntimeError('no such column: kaReset. DB error code: 1, please check log file for details')"
+}

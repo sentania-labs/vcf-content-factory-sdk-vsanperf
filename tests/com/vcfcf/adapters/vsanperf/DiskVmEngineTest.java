@@ -232,12 +232,14 @@ public final class DiskVmEngineTest {
         e.run(in(60_000));
         T.eq(1, log.count("an optional cluster-tier type"), "not repeated before the next refresh");
 
-        // A core type still fails the cluster (and a one-cluster cycle).
+        // A core type's transport-level failure (no vSphere fault body) still
+        // fails the cluster (and a one-cluster cycle): build 24, D8 amended.
         EngineTest.FakeVc core = TiersEngineTest.labVc();
         core.answers.put(LAB + "|host-domowner", new IOException("host-domowner: HTTP 502"));
         CycleEngine.Result rc = TiersEngineTest.engine(core, TiersEngineTest.labOps(core.inventory),
                 new T.RecLog(), TiersEngineTest.defaultTypes()).run(in(60_000));
-        T.eq(1, rc.clustersFailed, "core failure fails the cluster");
+        T.eq(1, rc.clustersFailed, "core transport failure fails the cluster");
+        T.eq(0, rc.requiredCallsFailed, "not a type fault");
         T.check(rc.failure != null, "and the one-cluster cycle");
 
         // Every call failing fails the cluster too.
@@ -336,7 +338,13 @@ public final class DiskVmEngineTest {
                     throws IOException {
                 maxInRead.accumulateAndGet(inRead.incrementAndGet(), Math::max);
                 try {
+                    // Real time, so the other worker reaches the permit while
+                    // this read holds it; then simulated time, so its wait
+                    // shows on T.CLOCK (build 23: with only the sleep the
+                    // wait read 0 whenever no fake call moved the clock
+                    // meanwhile, a flake since build 22).
                     Thread.sleep(60);
+                    T.CLOCK.addAndGet(60);
                     return super.readVms(cluster, withDevices, t);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();

@@ -22,6 +22,11 @@ import java.util.concurrent.ConcurrentHashMap;
  *     consecutive type-unavailable faults on that cluster, with the same
  *     re-probe spread; a re-probe that faults again re-learns at once. Any
  *     other answer starts the count over.
+ * <li><b>Server faults</b> (1.2.1, design D8): any other server fault on
+ *     any type (a parsed vSphere fault; build 24: not an HTTP error without
+ *     a fault body or another transport failure) strikes the same way, core
+ *     types included: learned after {@link #FAULT_STRIKES} consecutive
+ *     faulting cycles, re-probed with the spread. {@code ioinsight} is exempt.
  * </ul>
  * Never learned: the three core types on an empty echo
  * ({@link EntityType#learnsEmpty}), and {@code ioinsight} at all, which is
@@ -130,6 +135,24 @@ final class LearnedTypes {
     int streak(String clusterMoid, EntityType type) {
         Integer n = emptyStreak.get(key(clusterMoid, type));
         return n == null ? 0 : n;
+    }
+
+    /**
+     * 1.2.1 (design D2): forget everything learned on one cluster (its
+     * Performance Service was turned back on), so its first enabled cycle
+     * re-probes every type.
+     */
+    void clearCluster(String clusterMoid) {
+        String prefix = clusterMoid + '\u0000';
+        until.keySet().removeIf(k -> k.startsWith(prefix));
+        emptyStreak.keySet().removeIf(k -> k.startsWith(prefix));
+        faultStreak.keySet().removeIf(k -> k.startsWith(prefix));
+    }
+
+    /** The type is learned on that cluster now (tests). */
+    boolean learned(String clusterMoid, EntityType type, long nowMs) {
+        Long u = until.get(key(clusterMoid, type));
+        return u != null && nowMs < u;
     }
 
     void clear() {

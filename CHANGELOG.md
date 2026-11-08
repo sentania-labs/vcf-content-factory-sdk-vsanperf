@@ -1,5 +1,99 @@
 # Changelog
 
+## 1.2.1.24 (Unreleased)
+
+- fix(adapter): build 23 review B1. A vSAN endpoint outage could make every
+  type learned-skipped for 24 h while the cluster reported OK with
+  `last_error` none (each faulting cycle struck every type, even when every
+  call failed). D8 amended (Scott, 2026-11-08): (1) only a parsed vSphere
+  fault (an HTTP 500 with a fault class, e.g. `SystemError`, `InvalidArgument`,
+  `NotFound`) is a type fault; an HTTP error without a fault body, a reset, a
+  read error or an over-cap answer keeps the 1.2.0 handling (a core type
+  fails the cluster, an optional one is counted) and neither adds nor resets
+  a strike; (2) strikes are committed at the end of the cluster's task, only
+  when it ended OK with at least one call answered; otherwise they start
+  over, so a cluster where every call failed fails and learns nothing; (3) a
+  cluster that makes no perf call because every type is learned-skipped
+  still counts OK, but WARNs once per refresh and sets `last_error`
+  "cluster <moid>: all types learned-skipped; no perf call this cycle".
+- fix(adapter): review N1, N2. `masternotfound` (no stats primary) fails the
+  cluster on any type, core or not (1.2.0: only on a core type; an optional
+  type counted it as an optional failure), because it is a cluster-wide
+  condition, and now ends that cluster's calls for the cycle instead of
+  faulting every remaining type the same way.
+- fix(adapter): review N3, N4. The cycle summary shows the Performance
+  Service values as `state N` beside the tiers, so the breakdown adds up to
+  `series pushed`; the unresolved-cluster WARN names what is lost (the
+  Performance Service state, plus the cluster tier keys when that tier is on).
+- fix(content): review N5. The alert's type is Storage (18) / Configuration
+  (22), as the design says (was 16, Virtualization). The names stay as
+  authored and differ from the design table: alert "[VCF Content Factory]
+  vSAN Performance Service disabled on cluster (vSAN Perf collection
+  paused)" (design: "... Is Disabled on Cluster"), recommendation "[VCF
+  Content Factory] vSAN Enable Performance Service" (design: "Enable the
+  vSAN Performance Service"); the symptom name matches.
+- docs(adapter): review W2. Bundled content sections in REFERENCE.md,
+  README.md and docs/overview.md; the 1.2.1 behaviour in the README intro and
+  overview.
+- test(adapter): `PerfsvcEngineTest` gains `transportOutageRecovers` (three
+  all-503 cycles, then full calls and data on cycle 4, core-only and default
+  tiers), `serverFaultBesideTransportError`, `allTypesLearnedSkippedWarns`,
+  the every-call-failed no-learning case, and runs masternotfound on the
+  verbatim capture `queryperf-fault-masternotfound-osa-2026-11-07.json`
+  (review W1). `DiskVmEngineTest` again expects a core HTTP 502 to fail the
+  cluster.
+
+## 1.2.1.23 (Unreleased)
+
+- feat(adapter): a cluster whose vSAN Performance Service is disabled is
+  skipped (one `VsanClusterGetConfig` per cluster per cycle, not counted in
+  `perf_calls`; enabled iff `perfsvcConfig.enabled` is true; no perf call
+  and no disk-map or VM read for it; not ok, failed or timed out; no
+  `last_error`; it does not move the cluster rotation, and the cycle fails only
+  when every cluster that is not disabled failed; INFO on each
+  transition only; turning the service back on clears that cluster's
+  learned types). A failed or unreadable config read collects the cluster
+  as 1.2.0 did and pushes no state. New `Collection|clusters_perfsvc_disabled`;
+  new cluster key `vSAN Perf|Performance Service|enabled` (0/1), pushed
+  every cycle on every in-scope ClusterComputeResource whatever
+  `tier_cluster` says (the cluster list is now read whenever a cluster is
+  in scope). Bundled content (`content_naming: factory_prefixed`, on
+  VMWARE ClusterComputeResource, `content_foreign_adapter_kinds: [VMWARE]`):
+  symptom "[VCF Content Factory] vSAN Performance Service Disabled" (the key
+  `< 1`), alert "[VCF Content Factory] vSAN Performance Service disabled on
+  cluster (vSAN Perf collection paused)" (WARNING, risk) and recommendation
+  "[VCF Content Factory] vSAN Enable Performance Service". Design v3
+  "1.2.1", D1 to D7.
+- fix(adapter): a server fault stays with its type (design D8). An HTTP 500
+  fault, an unreadable fault body or an `IOException` that is not a timeout,
+  on any type, core types included, no longer fails the cluster: it is
+  counted (new `Collection|required_calls_failed` for the three core types,
+  `optional_calls_failed` as before for the rest), named in `last_error`,
+  WARNed at the first fault, and after three faulting cycles in a row the
+  type is skipped on that cluster for 24 h (re-probed with the spread; an
+  answer between faults starts the count over; `ioinsight` exempt). Devel
+  9.0.2: the OSA probe's `vsan-pnic-net` ("no such column: pfcCountRaw")
+  pinned `clusters_failed` at 1 every cycle; the RDT trio ("kaReset") was
+  called and WARNed forever. A cluster fails only on `NotAuthenticated`
+  twice, `ManagedObjectNotFound`, `masternotfound` on a cluster read as
+  enabled or unknown, a query batching fault (now on any type, not only
+  core: a pack defect), every perf call failing, or a failure after a call.
+- test(adapter): `PerfsvcEngineTest` (the D1 to D8 engine cases on the
+  simulated clock), `ClientFakeServerTest.clusterGetConfig`, T4 row (f)
+  in `ReplayBudgetTest` (the config read outside `perf_calls`, inside the
+  deadline); fixtures `vsanclustergetconfig-{enabled,absent}.json`
+  (verbatim), `-false.json` (synthetic) and
+  `queryperf-fault-systemerror-{pfccountraw,kareset}.json` (log text in a
+  constructed envelope). `ReferenceDocTest` checks the new key's row.
+- fix(test): `T.CLOCK` starts at a fixed 2026-11-07T14:00:00Z instead of
+  the wall clock. From 2026-11-08 the 1.2.0.22 engine tests failed on any
+  runner (the captures' samples fell outside the 24 h dedup-mark retention
+  and were pruned): a date bomb in the tests, not in the adapter.
+  `DiskVmEngineTest.vmReadsSerialize` no longer flakes: its fake VM read
+  slept in real time without moving the simulated clock, so the permit wait
+  read 0 on some interleavings; it now moves `T.CLOCK` while holding the
+  permit.
+
 ## 1.2.0.22 (Unreleased)
 
 - fix(adapter): build 22 (CI on PR #11, JDK 25 leg). Stop Collecting
