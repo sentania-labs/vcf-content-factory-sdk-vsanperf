@@ -68,7 +68,7 @@
 <text x="471" y="935" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#374151" text-anchor="middle">vSAN Perf|CLOM Disk:&lt;disk uuid&gt;|*</text>
 <text x="471" y="950" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#374151" text-anchor="middle">vSAN Perf|Disk Health:&lt;disk uuid&gt;|*</text>
 <text x="471" y="965" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#374151" text-anchor="middle">vSAN Perf|Resync|*</text>
-<rect x="682" y="190" width="295" height="344" rx="6" fill="#fff7ed" stroke="#c2410c" stroke-width="1.5" stroke-dasharray="6 4"/>
+<rect x="682" y="190" width="295" height="359" rx="6" fill="#fff7ed" stroke="#c2410c" stroke-width="1.5" stroke-dasharray="6 4"/>
 <text x="830" y="212" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#111827" text-anchor="middle">ClusterComputeResource</text>
 <text x="830" y="230" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#374151" text-anchor="middle">VMWARE (external)</text>
 <text x="830" y="245" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#374151" text-anchor="middle">vSAN Perf|Capacity|*</text>
@@ -90,6 +90,7 @@
 <text x="830" y="485" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#374151" text-anchor="middle">vSAN Perf|PMem|*</text>
 <text x="830" y="500" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#374151" text-anchor="middle">vSAN Perf|Remote DOM Client|*</text>
 <text x="830" y="515" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#374151" text-anchor="middle">vSAN Perf|Compute Remote DOM Client|*</text>
+<text x="830" y="530" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#374151" text-anchor="middle">vSAN Perf|Performance Service|*</text>
 <rect x="1037" y="190" width="316" height="149" rx="6" fill="#fff7ed" stroke="#c2410c" stroke-width="1.5" stroke-dasharray="6 4"/>
 <text x="1195" y="212" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#111827" text-anchor="middle">VirtualMachine</text>
 <text x="1195" y="230" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="#374151" text-anchor="middle">VMWARE (external)</text>

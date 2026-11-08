@@ -1,0 +1,22 @@
+name: "[VCF Content Factory] vSAN Performance Service disabled on cluster (vSAN Perf collection paused)"
+description: >
+  Fires when the vSAN Performance Service is disabled on a vCenter cluster. The VCF Content Factory vSAN Performance pak skips the cluster and collects no vSAN performance metrics until the service is enabled. This is a loss of monitoring, not a workload fault. Cancels on the next cycle after the service is re-enabled.
+adapter_kind: VMWARE
+resource_kind: ClusterComputeResource
+type: 18              # Storage (design v3 "1.2.1": storage / configuration; build 24, review N5)
+sub_type: 22          # Configuration
+wait_cycles: 1
+cancel_cycles: 1
+criticality: WARNING
+impact:
+  badge: RISK
+symptom_sets:
+  operator: ALL
+  sets:
+    - defined_on: SELF
+      operator: ALL
+      symptoms:
+        - name: "[VCF Content Factory] vSAN Performance Service Disabled"
+recommendations:
+  - name: "[VCF Content Factory] vSAN Enable Performance Service"
+    priority: 1

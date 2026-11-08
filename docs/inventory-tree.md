@@ -1,6 +1,6 @@
 # Inventory Tree: VCF Content Factory vSAN Performance
 
-> Generated from `describe.xml` v0.0.0.22. Do not edit: regenerated on every build.
+> Generated from `describe.xml` v0.0.0.24. Do not edit: regenerated on every build.
 
 ## Traversal Tree
 
@@ -100,6 +100,7 @@ This pak pushes keys onto resource kinds owned by other management packs, throug
 | `vSAN Perf\|PMem\|*` |
 | `vSAN Perf\|Remote DOM Client\|*` |
 | `vSAN Perf\|Compute Remote DOM Client\|*` |
+| `vSAN Perf\|Performance Service\|*` |
 
 ### VirtualMachine (VMWARE)
 

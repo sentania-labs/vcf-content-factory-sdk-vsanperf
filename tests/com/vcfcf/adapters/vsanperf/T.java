@@ -12,14 +12,18 @@ final class T {
     private T() {}
 
     /**
-     * Build 22: the simulated clock every engine test runs on. It starts at
-     * the real time (so dedup-mark pruning and learned-type windows see
-     * realistic times) and moves only when a fixture moves it (FakeVc
-     * delays), so no cycle deadline or per-call budget depends on how fast
-     * the runner is.
+     * Build 22: the simulated clock every engine test runs on. It moves only
+     * when a fixture moves it (FakeVc delays), so no cycle deadline or
+     * per-call budget depends on how fast the runner is. Build 23: it starts
+     * at a fixed time, 2026-11-07T14:00:00Z, just after the newest capture's
+     * sample (13:54:50Z): starting at the real time made every test whose
+     * samples must survive the 24 h dedup-mark retention fail from
+     * 2026-11-08 on (a date bomb, not a regression).
      */
+    static final long START_MS = java.time.Instant.parse("2026-11-07T14:00:00Z").toEpochMilli();
+
     static final java.util.concurrent.atomic.AtomicLong CLOCK =
-            new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
+            new java.util.concurrent.atomic.AtomicLong(START_MS);
 
     /** A deadline {@code ms} after the simulated now. */
     static long in(long ms) {

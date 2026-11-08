@@ -19,6 +19,26 @@ vCenter adapter's own objects, under `vSAN Perf|...`:
 
 Key list: [REFERENCE.md](../REFERENCE.md).
 
+**Performance Service state (1.2.1).** Every cycle the pack reads each
+cluster's vSAN Performance Service configuration (`VsanClusterGetConfig`).
+A cluster with the service disabled is skipped (no performance call, not
+counted as failed, `Collection|clusters_perfsvc_disabled`) and gets
+`vSAN Perf|Performance Service|enabled` = 0 on its ClusterComputeResource
+(1 when enabled), whatever the tier settings.
+
+### Bundled content
+
+- Symptom **"[VCF Content Factory] vSAN Performance Service Disabled"**
+  (VMWARE ClusterComputeResource, metric static
+  `vSAN Perf|Performance Service|enabled` `< 1`, WARNING, wait 2 cycles,
+  cancel 1).
+- Alert **"[VCF Content Factory] vSAN Performance Service disabled on
+  cluster (vSAN Perf collection paused)"** (ClusterComputeResource,
+  WARNING, impact risk, type Storage / Configuration, wait 1, cancel 1).
+- Recommendation **"[VCF Content Factory] vSAN Enable Performance
+  Service"** (vSphere Client: cluster > Configure > vSAN > Services >
+  Performance Service > Edit / Turn On).
+
 ### Resource kinds
 
 | Kind | Notes |

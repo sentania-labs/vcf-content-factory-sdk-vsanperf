@@ -1,0 +1,8 @@
+name: "[VCF Content Factory] vSAN Enable Performance Service"
+description: |
+  The vSAN Performance Service is turned off on this cluster. The VCF Content Factory vSAN Performance pak collects nothing for this cluster until the service is on, so vSAN performance metrics, dashboards and capacity trends have a gap for as long as it stays off.
+
+  In the vSphere Client, select the cluster, then open Configure, vSAN, Services, and find Performance Service. Choose Edit (or Turn On), pick the storage policy for the performance service database, and apply. Metrics resume on the next collection cycle after the service is enabled, and this alert clears on its own.
+
+  The built-in vSAN health check "vSAN Performance Service is not enabled" reports the same state on the vSAN management pack's own cluster object, so enabling the service clears that finding too.
+adapter_kind: VMWARE

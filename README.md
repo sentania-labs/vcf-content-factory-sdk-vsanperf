@@ -28,6 +28,20 @@ default tiers (about 6x per host, 4x per cluster). Design: the factory's
 `knowledge/designs/vsanperf-mp-v1.md`, `vsanperf-mp-v2.md` with its P2
 addendum, and `vsanperf-mp-v3.md` with its decisions addendum.
 
+Version 1.2.1 reads each cluster's vSAN **Performance Service** state first
+(`VsanClusterGetConfig`, not counted in `perf_calls`). A cluster with the
+service disabled is skipped (no perf call, not counted failed) and flagged on
+its ClusterComputeResource as `vSAN Perf|Performance Service|enabled` = 0
+(1 when on), which the bundled symptom and alert act on (see "Bundled
+content"). A vSphere fault on one entity type stays with that type: it is
+counted (`required_calls_failed` for the core types,
+`optional_calls_failed` otherwise) and, after three faulting cycles in a row
+on a cluster that otherwise collected, skipped there for 24 hours. An HTTP
+error with no vSphere fault body is not a type fault and keeps the 1.2.0
+handling. `masternotfound` (no stats primary) fails the cluster on any type,
+core or not, since it is cluster-wide, and ends that cluster's calls for the
+cycle.
+
 ## Keys
 
 At dashboard scope (the default; under `all` most of these groups carry more
@@ -256,6 +270,50 @@ Install on VCF Operations 8.18, 9.0 and 9.1 (design T5) and check, on each:
       (learned state reset).
    8. After a host reboot: `DOM World` instances of that host change (new
       world ids); the old ones stop receiving data (accepted, design Q8).
+
+8. **1.2.1, Performance Service state and type fault isolation (design v3
+   "1.2.1", T5; devel 9.0.2 first: `metric_scope=dashboard`, host and
+   cluster tiers on, disk and VM tiers off, N = 3, timing logging on;
+   scope `vcf-lab-mgmt-cl01` (service on) and `vcf-lab-osa-probe-cl01`).**
+   1. Upgrade in place from 1.2.0.22. With the probe's service **on**
+      (as of 2026-11-08), build 22 shows 43 calls a cycle (probe 20, cl01
+      23) and `clusters_failed` 1 (the core `vsan-pnic-net` faults
+      `SystemError` "no such column: pfcCountRaw" there). On 1.2.1, cycles
+      1 to 3 once the learned empties settle: `clusters_failed` 0,
+      `required_calls_failed` 1 (`vsan-pnic-net`), `optional_calls_failed`
+      3 (`cluster-rdt-network-latency`, `rdt-network-latency`,
+      `vnic-rdt-network-latency`, "no such column: kaReset"), `last_error`
+      names one of them, one WARN per type. From cycle 4: both counters 0,
+      **39 calls** steady (probe 16, cl01 23), learned skips up by 4, four
+      INFO "faulted (SystemError) 3 cycles in a row" lines, `last_error`
+      `none`. The probe's hosts lose the pNIC core keys while the type is
+      learned (accepted: it never answers there). A type that faults on the
+      server is counted, named in `last_error` for three cycles, then
+      skipped for 24 h; the cluster is never counted failed for it.
+   2. With the probe's service **off** (`VsanClusterGetConfig` without
+      `perfsvcConfig`, as captured 2026-11-07): `perf_calls` 23 (cl01 only;
+      cl01 26 on cycles 1 to 3), `clusters_perfsvc_disabled` 1,
+      `clusters_failed` 0, `last_error` `none`, no probe `masternotfound`
+      WARN, one INFO "Performance Service disabled on domain-c39146
+      (vcf-lab-osa-probe-cl01); perf collection skipped" and none after.
+   3. Read back, at least 6 minutes after the push:
+      `vSAN Perf|Performance Service|enabled` 0 on the probe cluster, 1 on
+      cl01 (also with `tier_cluster` off).
+   4. The bundled alert "[VCF Content Factory] vSAN Performance Service
+      disabled on cluster (vSAN Perf collection paused)" (symptom "[VCF
+      Content Factory] vSAN Performance Service Disabled", `< 1`, wait 2,
+      cancel 1; recommendation "[VCF Content Factory] vSAN Enable
+      Performance Service") is active on the probe cluster within 2 Ops
+      cycles of the first 0, absent on cl01, and cancels within a cycle of
+      the first 1.
+   5. Scott enables (or disables) the service on the probe (a vCenter
+      write, his call): the next cycle logs the transition INFO and pushes
+      the new value; after enabling, the probe re-probes every type
+      (`perf_calls` 49 = 23 + 26 on its first cycles). Optional: capture
+      the `VsanClusterGetConfig` body after an enable-then-disable to
+      settle absent versus `enabled: false` (api-cartographer).
+   6. 8.18 and 9.1: `clusters_perfsvc_disabled` 0, the value 1 on every
+      cluster, no alert.
 
 **Results so far (devel 9.0.2, build 5).** Check 1 passed: all 12 values
 read back on the instance; 390 series pushed, keys on all 5 hosts at the
@@ -577,11 +635,24 @@ This pak **never** carries `vrops-adapters-sdk` or any Broadcom jar:
 
 `.gitignore` ignores `lib/*.jar` so a stray jar can't be committed.
 
-## Bundled content (optional)
+## Bundled content
 
-For an adapter that ships dashboards/views, add a `bundled_content:` block to
-`adapter.yaml` and co-locate the YAML **in this repo** under `views/` and
-`dashboards/` (paths resolve relative to `adapter.yaml`).
+Since 1.2.1 the pak installs three content items with the adapter
+(`bundled_content:` in `adapter.yaml`, files under `symptoms/`, `alerts/`
+and `recommendations/`; `content_naming: factory_prefixed`;
+`content_foreign_adapter_kinds: [VMWARE]` because they target the vCenter
+adapter's ClusterComputeResource, where the pak stitches its key):
+
+- Symptom **"[VCF Content Factory] vSAN Performance Service Disabled"**
+  (VMWARE ClusterComputeResource, metric static
+  `vSAN Perf|Performance Service|enabled` `< 1`, WARNING, wait 2 cycles,
+  cancel 1).
+- Alert **"[VCF Content Factory] vSAN Performance Service disabled on
+  cluster (vSAN Perf collection paused)"** (ClusterComputeResource,
+  WARNING, impact risk, type Storage / Configuration, wait 1, cancel 1).
+- Recommendation **"[VCF Content Factory] vSAN Enable Performance
+  Service"** (vSphere Client: cluster > Configure > vSAN > Services >
+  Performance Service > Edit / Turn On).
 
 ## License
 

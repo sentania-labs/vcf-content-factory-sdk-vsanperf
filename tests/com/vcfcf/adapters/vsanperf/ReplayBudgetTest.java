@@ -125,6 +125,7 @@ public final class ReplayBudgetTest {
         allScopePerCluster();
         allTiers("(e) scope all, all tiers, VM N=3, per-cluster", false, 3, 4, true,
                 EntityType.Scope.ALL, ALL_VM_PEAK_CEILING, ALL_VM_RETAINED_CEILING);
+        perfsvcConfigRead();
         System.out.println("ReplayBudgetTest: wall " + (System.nanoTime() - w0) / 1_000_000_000
                 + " s");
         System.out.println("ReplayBudgetTest: all assertions passed");
@@ -169,6 +170,46 @@ public final class ReplayBudgetTest {
         T.check(peak < DEFAULT_PEAK_CEILING, "regression ceiling: peak " + peak / MB + " MB < 15 MB");
         System.out.println("T4 (a) peak heap delta " + String.format(java.util.Locale.ROOT, "%.1f",
                 peak / (double) MB) + " MB (budget 65 MB)");
+    }
+
+    /**
+     * 1.2.1 (design D1, T1 last row): the {@code VsanClusterGetConfig} read
+     * is outside {@code perf_calls} and inside the cycle deadline. 10 x 6
+     * hosts, per cluster, 2 clusters disabled: 10 reads a cycle, 8 x 26 perf
+     * calls (8 x 23 from cycle 4), the two disabled clusters counted apart.
+     * Then one cluster whose read alone outlasts the deadline: it makes no
+     * perf call and times out.
+     */
+    static void perfsvcConfigRead() throws Exception {
+        ReplayHarness.Config c = new ReplayHarness.Config();
+        c.clusters = 10;
+        c.cycles = 4;
+        c.perVcenter = false;
+        c.perfsvcConfig = true;
+        c.perfsvcDisabled = 2;
+        List<ReplayHarness.CycleResult> rs = new ReplayHarness(c).run(null);
+        print("(f) perfsvc config read", rs);
+        for (ReplayHarness.CycleResult r : rs) {
+            T.eq(null, r.res.failure, "(f) cycle " + r.cycle + " does not fail");
+            T.eq(10L, r.configCalls, "(f) cycle " + r.cycle + ": one config read per cluster");
+            T.eq(r.cycle <= 3 ? 8 * 26 : 8 * 23, r.res.perfCalls, "(f) cycle " + r.cycle
+                    + ": perf calls of the 8 enabled clusters only, config reads not counted");
+            T.eq(8, r.res.clustersOk, "(f) cycle " + r.cycle + ": enabled clusters ok");
+            T.eq(2, r.res.clustersPerfsvcDisabled, "(f) cycle " + r.cycle + ": disabled");
+            T.eq(0, r.res.clustersFailed + r.res.clustersTimedOut, "(f) neither failed nor cut");
+            T.eq(10, r.res.clustersInScope, "(f) in scope counts the disabled ones");
+        }
+
+        ReplayHarness.Config d = new ReplayHarness.Config();
+        d.clusters = 1;
+        d.cycles = 1;
+        d.perfsvcConfig = true;
+        d.configLatencyMs = d.deadlineMs + 1_000;
+        ReplayHarness.CycleResult r = new ReplayHarness(d).run(null).get(0);
+        print("(f') config read past the deadline", List.of(r));
+        T.eq(1L, r.configCalls, "(f') the read is made");
+        T.eq(0, r.res.perfCalls, "(f') its time counts against the deadline: no perf call after");
+        T.eq(1, r.res.clustersTimedOut, "(f') the cluster times out");
     }
 
     /** T4 (a'), recorded: the per-cluster ceiling. */

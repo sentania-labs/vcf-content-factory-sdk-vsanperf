@@ -1,0 +1,16 @@
+name: "[VCF Content Factory] vSAN Performance Service Disabled"
+adapter_kind: VMWARE
+resource_kind: ClusterComputeResource
+severity: WARNING
+wait_cycles: 2
+cancel_cycles: 1
+
+condition:
+  type: metric_static
+  key: "vSAN Perf|Performance Service|enabled"
+  operator: LT
+  value: 1
+  instanced: false
+
+description: >
+  Triggers when the vsanperf pak reports the vSAN Performance Service as disabled on a vCenter cluster (vSAN Perf|Performance Service|enabled below 1). Performance metrics are skipped for that cluster until the service is enabled. Clears on the next cycle that reports 1.

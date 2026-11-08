@@ -45,6 +45,40 @@ vSAN ESA cluster `domain-c6004`, 5 hosts), 2026-11-06. Provenance:
   sections "JSON API transport", "vim25 inventory over JSON" and "Build 2
   entity types (measured 2026-11-06)".
 
+- 1.2.1 (build 23), the Performance Service state (design v3 "1.2.1"):
+  `vsanclustergetconfig-enabled.json` and `vsanclustergetconfig-absent.json`
+  are byte-for-byte copies of the factory's
+  `reference/docs/extracted/vsan-osa-probe/01-esa-vsanclustergetconfig.json`
+  (ESA `domain-c6004`, `perfsvcConfig: {"enabled": true}`) and
+  `01-osa-vsanclustergetconfig.json` (OSA probe `domain-c39146`, no
+  `perfsvcConfig`); provenance that folder's `PROVENANCE-2026-11-07.md`
+  (vCenter 9.1.1.0100 build 25784172, release id `8.0.3.0`, 2026-11-07).
+  **`vsanclustergetconfig-false.json` is SYNTHETIC**: the OSA capture with
+  `"perfsvcConfig": {"_typeName": "VsanPerfsvcConfig", "enabled": false}`
+  inserted in the server's formatting; whether a cluster that had the
+  service on and then off reports this or omits the key is unverified.
+- 1.2.1 (build 23), the server faults of design D8:
+  `queryperf-fault-systemerror-pfccountraw.json` (core `vsan-pnic-net`) and
+  `queryperf-fault-systemerror-kareset.json` (the three RDT types) are
+  **constructed**. The fault class `SystemError` and the faultstring are
+  verbatim from the devel 9.0.2 adapter log of build 22 (2026-11-08,
+  cluster `domain-c39146`, lines "vSphere fault SystemError: A general
+  system error occurred: RuntimeError('no such column: pfcCountRaw. DB error
+  code: 1, please check log file for details') (HTTP 500)" and the same
+  with `kaReset`): the log carries the fault text, not the raw body. They
+  are wrapped in the HTTP 500 JSON envelope of the factory's
+  `reference/docs/extracted/vsan-osa-probe/05-osa-queryperf-disk-group.json`
+  (`_typeName`, `faultstring`, server indentation), without a
+  `faultMessage` array, since the logged message shows no fault key. A raw
+  capture may replace them (RULE-016).
+- Build 24 (review W1): `queryperf-fault-masternotfound-osa-2026-11-07.json`
+  is a byte-for-byte copy of the factory's
+  `reference/docs/extracted/vsan-osa-probe/05-osa-queryperf-disk-group.json`
+  (OSA probe `domain-c39146`, Performance Service off, HTTP 500 `NotFound`
+  with `faultMessage[0].key`
+  `com.vmware.vsan.perfsvc.fault.masternotfound`); provenance that folder's
+  `PROVENANCE-2026-11-07.md`.
+
 No credential or session id is in any file (scanned at capture). Never edit
 them: a test that needs another shape builds it in code and says so.
 
@@ -165,6 +199,12 @@ them: a test that needs another shape builds it in code and says so.
 | `all-vsan-vnic-net-2026-11-07.json` | `a8b87a76cbf7b64d` |
 | `all-vscsi-2026-11-07.json` | `1d46557f3be662be` |
 | `all-zdom-vtx-2026-11-07.json` | `db6e8abcd0ed6f60` |
+| `vsanclustergetconfig-enabled.json` | `f1799f5d37eff460` |
+| `vsanclustergetconfig-absent.json` | `91f104e5b68603d7` |
+| `vsanclustergetconfig-false.json` (synthetic) | `fe5874c2562dee80` |
+| `queryperf-fault-systemerror-pfccountraw.json` (constructed) | `7286d4b5ffa0ad8c` |
+| `queryperf-fault-systemerror-kareset.json` (constructed) | `a85046b84785ff25` |
+| `queryperf-fault-masternotfound-osa-2026-11-07.json` | `4137d1f3c6aa5ed4` |
 
 ## `design-build1-metrics.md`: the design's metric table
 

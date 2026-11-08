@@ -148,6 +148,11 @@
 				                   isProperty="false" defaultMonitored="true"/>
 				<ResourceAttribute key="optional_calls_failed" nameKey="38" dataType="float"
 				                   isProperty="false" defaultMonitored="true"/>
+				<!-- 1.2.1 (factory design vsanperf-mp-v3 "1.2.1", D2 and D8). -->
+				<ResourceAttribute key="clusters_perfsvc_disabled" nameKey="44" dataType="float"
+				                   isProperty="false" defaultMonitored="true"/>
+				<ResourceAttribute key="required_calls_failed" nameKey="45" dataType="float"
+				                   isProperty="false" defaultMonitored="true"/>
 			</ResourceGroup>
 		</ResourceKind>
 

@@ -21,7 +21,8 @@ import java.util.regex.Pattern;
 /**
  * The vSphere JSON API client: vim25 session, ServiceContent, the cluster
  * inventory read, the vSAN {@code VsanPerfQueryPerf} call (parsed from the
- * gzip stream one entity at a time, build 11), the per-host
+ * gzip stream one entity at a time, build 11), the per-cluster
+ * {@code VsanClusterGetConfig} (1.2.1, Performance Service state), the per-host
  * {@code QueryDisksForVsan} (disk tier) and the per-cluster VM read (VM
  * tier). Plain JDK
  * {@link HttpClient} (no vSAN or vim25 SDK jars), on the platform TLS
@@ -536,6 +537,57 @@ final class VsanJsonClient implements CycleEngine.VcenterApi {
             if (n > 0) count += n;
             return n;
         }
+    }
+
+    /**
+     * 1.2.1 (design D1): the {@code VsanClusterGetConfig} path, on the vSAN
+     * MO {@code vsan-cluster-config-system} under the same {@code vsan/}
+     * namespace and session as the perf call (OSA-MAP section 1, captures
+     * {@code 01-*-vsanclustergetconfig.json}).
+     */
+    String configPath() {
+        return "/sdk/vim25/" + release
+                + "/vsan/VsanVcClusterConfigSystem/vsan-cluster-config-system/VsanClusterGetConfig";
+    }
+
+    /** The {@code VsanClusterGetConfig} body: the cluster MoRef only. */
+    static String configBody(String clusterMoid) {
+        return "{\"cluster\":{\"_typeName\":\"ManagedObjectReference\","
+                + "\"type\":\"ClusterComputeResource\",\"value\":" + Json.quote(clusterMoid) + "}}";
+    }
+
+    /**
+     * Design D1: enabled iff {@code perfsvcConfig.enabled == true}. An absent
+     * {@code perfsvcConfig} (the OSA probe, never enabled) or {@code false}
+     * is disabled. A body that is not a {@code VsanConfigInfoEx}-shaped JSON
+     * object is {@link Unreadable} (the caller reads that as unknown).
+     */
+    static boolean perfsvcEnabled(String body) throws Unreadable {
+        SimpleJson root;
+        try {
+            root = SimpleJson.parse(body);
+        } catch (RuntimeException e) {
+            throw new Unreadable("VsanClusterGetConfig: the answer is not JSON");
+        }
+        String cls = root.isObject() ? root.get("_typeName").asString() : null;
+        if (cls == null || cls.isEmpty()) {
+            throw new Unreadable("VsanClusterGetConfig: the answer is not a vSAN cluster config");
+        }
+        SimpleJson perf = root.get("perfsvcConfig");
+        return perf.isObject() && "true".equals(perf.get("enabled").asString());
+    }
+
+    @Override
+    public Boolean perfsvcEnabled(String clusterMoid, long timeoutMs)
+            throws IOException, InterruptedException {
+        long deadline = deadlineIn(timeoutMs);
+        String body = configBody(clusterMoid);
+        return authenticated(deadline, s -> {
+            Reply r = exchange("POST", configPath(), body, s.token, deadline,
+                    "VsanClusterGetConfig");
+            if (r.body == null) throw new Unreadable("VsanClusterGetConfig returned no body");
+            return perfsvcEnabled(r.body);
+        });
     }
 
     /** The {@code QueryDisksForVsan} path for a host's {@code configManager.vsanSystem}. */

@@ -111,6 +111,17 @@ final class ReplayHarness {
         double pushMsPerResource = 1.5;
         /** Build 19: the metric scope (design v3). */
         EntityType.Scope scope = EntityType.Scope.DASHBOARD;
+        /**
+         * 1.2.1 (design D1): answer {@code VsanClusterGetConfig}. Off by
+         * default, so every earlier row runs as in 1.2.0 (state unknown, no
+         * config call). On: the first {@link #perfsvcDisabled} clusters
+         * answer disabled, the rest enabled; each read takes
+         * {@link #configLatencyMs} of the worker's simulated time (OSA-MAP:
+         * 12 to 48 ms), outside the perf throttle.
+         */
+        boolean perfsvcConfig = false;
+        int perfsvcDisabled = 0;
+        long configLatencyMs = 48;
 
         List<EntityType> types() {
             return new VsanPerfConfig("vc", "u", "p", "", "", null, null, null, null,
@@ -144,6 +155,8 @@ final class ReplayHarness {
         long retainedHeapDelta;
         /** Simulated Suite API push time of the cycle (the caller is blocked for it). */
         long pushSimMs;
+        /** 1.2.1: VsanClusterGetConfig reads this cycle (not perf calls). */
+        long configCalls;
         int pushCalls;
 
         @Override
@@ -590,6 +603,8 @@ final class ReplayHarness {
         private final Map<String, long[]> clusterNextFree = new ConcurrentHashMap<>();
         final AtomicLong calls = new AtomicLong();
         final AtomicLong vmReads = new AtomicLong();
+        /** 1.2.1: VsanClusterGetConfig reads. */
+        final AtomicLong configCalls = new AtomicLong();
         private final Map<String, Integer> index = new ConcurrentHashMap<>();
 
         Vcenter(VirtualClock clock) {
@@ -697,6 +712,13 @@ final class ReplayHarness {
             PerfParser.Result r = PerfParser.parse(in, type, scope);
             // Wire bytes: the lab's gzip ratio is about 1:10 to 1:17.
             return new CycleEngine.PerfCall(r, 200, in.count / 12, in.count);
+        }
+
+        @Override public Boolean perfsvcEnabled(String cluster, long t) {
+            if (!cfg.perfsvcConfig) return null;
+            configCalls.incrementAndGet();
+            clock.advance(clock.worker() + cfg.configLatencyMs);
+            return index.get(cluster) >= cfg.perfsvcDisabled;
         }
 
         @Override public List<String> queryDisksForVsan(String vsanSystem, long t) {
@@ -848,6 +870,7 @@ final class ReplayHarness {
             long before = ops.values.get();
             long pushMsBefore = ops.pushSimMs.get();
             long pushCallsBefore = ops.pushCalls.get();
+            long configBefore = vc.configCalls.get();
             Map<String, Long> kindBefore = snapshot(ops.byKind);
             HeapSampler sampler = cfg.heap ? new HeapSampler(cfg.heapSampleMs) : null;
             long w0 = System.nanoTime();
@@ -864,6 +887,7 @@ final class ReplayHarness {
             cr.valuesPushed = ops.values.get() - before;
             cr.pushSimMs = ops.pushSimMs.get() - pushMsBefore;
             cr.pushCalls = (int) (ops.pushCalls.get() - pushCallsBefore);
+            cr.configCalls = vc.configCalls.get() - configBefore;
             AtomicLong nb = ops.byTime.get(vc.newest);
             cr.newestBucketValues = nb == null ? 0 : nb.get();
             for (Map.Entry<String, Long> k : snapshot(ops.byKind).entrySet()) {

@@ -100,6 +100,20 @@ final class VsanFault extends IOException {
         return is(INVALID_ARGUMENT) && faultString.trim().endsWith("entityRefId");
     }
 
+    /**
+     * 1.2.1 (design D3): {@code com.vmware.vsan.perfsvc.fault.masternotfound},
+     * "Stats primary cannot be found in the cluster." The Performance Service
+     * is off, or (unverified) its stats primary is being re-elected. The
+     * config read decides "disabled"; on a cluster read as enabled or unknown
+     * this fault fails the cluster and is never learned.
+     */
+    boolean isMasterNotFound() {
+        for (String k : keys) {
+            if (k.endsWith(".masternotfound")) return true;
+        }
+        return false;
+    }
+
     /** One of the query batching faults (wildcardlimit and its siblings). */
     boolean isBatchingFault() {
         for (String k : keys) {

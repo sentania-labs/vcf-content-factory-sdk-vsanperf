@@ -1,6 +1,8 @@
 # VCF Content Factory vSAN Performance: Reference
 
-Version 1.2.0, build 19 (Build 3 of the design: `metric_scope`). 69 entity
+Version 1.2.1, build 23 (1.2.0, build 19, was Build 3 of the design:
+`metric_scope`; 1.2.1 adds the Performance Service state and type fault
+isolation, see "Performance Service state (1.2.1)" below). 69 entity
 types, 1,805 keys: 451 at dashboard scope (the default, 33 types, Builds 1
 and 2 unchanged) and 1,354 more under `metric_scope=all` (1,144 from the
 Python pack's model, the rest of its 1,595, and 210 ESA dedup labels the
@@ -8,8 +10,10 @@ Python pack's model, the rest of its 1,595, and 210 ESA dedup labels the
 Every key table has a **Scope** column: `dashboard` keys are collected under
 either scope, `all` keys only under `all`. Design: the factory's
 `knowledge/designs/vsanperf-mp-v1.md`, `vsanperf-mp-v2.md` with its P2
-addendum, and `vsanperf-mp-v3.md` with its decisions addendum, each for
-what it changes.
+addendum, and `vsanperf-mp-v3.md` with its decisions addendum and its
+"1.2.1: Performance Service disabled" section, each for what it changes.
+Besides the 1,805 Performance Service keys, one key of the pack's own lands
+on every in-scope cluster: `vSAN Perf|Performance Service|enabled`.
 
 ## Adapter
 
@@ -89,9 +93,9 @@ account's identity.
 |---|---|---|
 | `Collection\|clusters_in_scope` | Clusters in scope | vSAN-enabled clusters after include/exclude |
 | `Collection\|clusters_ok` | Clusters collected | clusters whose calls all returned |
-| `Collection\|clusters_failed` | Clusters failed | a core-type call (DOM owner, DOM client, pNIC) faulted or errored, the cluster object vanished, or every call of the cluster failed (build 11; before, any type's failure counted) |
+| `Collection\|clusters_failed` | Clusters failed | 1.2.1: the session was refused after a fresh login (`NotAuthenticated` twice), the cluster object vanished (`ManagedObjectNotFound`), the Performance Service has no stats primary (`masternotfound`) on a cluster whose config read said enabled or could not be read, a query batching fault (a pack defect), every perf call of the cluster failed, a core type's call failed without a vSphere fault body (HTTP error, reset, read error, over-cap; as in 1.2.0), or the pack failed after a call. A parsed vSphere fault of one type, core types included, is no longer a cluster failure (see `required_calls_failed`). Build 11 to 1.2.0: also any core-type fault |
 | `Collection\|clusters_timed_out` | Clusters timed out | per-call timeout or cycle deadline |
-| `Collection\|perf_calls` | Performance Service calls | `VsanPerfQueryPerf` calls this cycle |
+| `Collection\|perf_calls` | Performance Service calls | `VsanPerfQueryPerf` calls this cycle (not the per-cluster `VsanClusterGetConfig` read, 1.2.1) |
 | `Collection\|series_pushed` | Series pushed | values handed to the Suite API batch push |
 | `Collection\|hosts_unresolved` | Hosts unresolved | vSAN node uuids or host MoRefs with no HostSystem object of this vCenter. A host the vCenter adapter starts collecting later is picked up at the next refresh of the HostSystem list: every 12th cycle (up to an hour at 5 minutes), sooner if the cluster's host set changes |
 | `Collection\|push_batches_failed` | Push batches failed | from the batch push result |
@@ -103,12 +107,18 @@ account's identity.
 | `Collection\|disks_unresolved` | Disks unresolved | build 11: vSAN disk uuids in the disk-tier data that the disk map places on no host (a host whose `QueryDisksForVsan` failed, or a disk added since the last map read) |
 | `Collection\|vms_unresolved` | VMs unresolved | build 11: VM instanceUuids not in the cluster's VM read, and VMs with no VMWARE VirtualMachine object of this vCenter |
 | `Collection\|vdisks_unresolved` | Virtual disks unresolved | build 11: vdisk paths not in the device map, or on an unknown controller type or a path two disks share (never guessed) |
-| `Collection\|optional_calls_failed` | Optional calls failed | build 11 (review W1): failed calls of non-core types; each is named in `last_error` and logged once per cluster and type per refresh, and the cluster still counts as collected. Build 19: includes the faults of the nine `metric_scope=all` types that fault on every ref form on 9.1.1 (`clom-host`, `clom-disk`, `cmmds-workload`, `ddh-disk`, `heap-memory`, `slab-memory`, `remote-virtual-machine`, `remote-virtual-disk`, `remote-vscsi`) until they are learned, three faults in a row |
+| `Collection\|optional_calls_failed` | Optional calls failed | build 11 (review W1): failed calls of non-core types (1.2.1: after three faulting cycles in a row a type is skipped for about 24 hours, `ioinsight` excepted); each is named in `last_error` and logged once per cluster and type per refresh, and the cluster still counts as collected. Build 19: includes the faults of the nine `metric_scope=all` types that fault on every ref form on 9.1.1 (`clom-host`, `clom-disk`, `cmmds-workload`, `ddh-disk`, `heap-memory`, `slab-memory`, `remote-virtual-machine`, `remote-virtual-disk`, `remote-vscsi`) until they are learned, three faults in a row |
+| `Collection\|clusters_perfsvc_disabled` | Clusters with Performance Service disabled | 1.2.1: in-scope clusters whose `VsanClusterGetConfig` shows the vSAN Performance Service off (`perfsvcConfig` absent or `enabled: false`). They make no perf call, are neither collected, failed nor timed out, set no `last_error`, and still count in `clusters_in_scope` |
+| `Collection\|required_calls_failed` | Required (core) type calls failed | 1.2.1: parsed vSphere faults (HTTP 500 with a fault body, build 24) of the three core types (DOM owner, DOM client, pNIC). Each is named in `last_error` and logged once per cluster and type per refresh; the cluster still counts as collected; after three faulting cycles in a row the type is skipped on that cluster for about 24 hours (see Learned types) |
 | `Collection\|entities_unparsed` | Entities unparsed | build 10: entities skipped for their id form (a wrong part count, or an id of a runtime-landing type that is neither the cluster's uuid nor one of its node uuids; build 19: `host-cpu` takes 1 or 2 parts, the world types and `vsan-iscsi-lun` 3, and a `cluster-pmem` node uuid is never landed) |
 
 ## Collection per cycle
 
-One wildcard `VsanPerfQueryPerf` call per entity type in scope per vSAN
+First, per in-scope cluster, one `VsanClusterGetConfig` read (1.2.1, about
+12 to 48 ms, not counted in `perf_calls`). A cluster whose vSAN Performance
+Service is disabled makes **0 perf calls** and none of the disk-map or VM
+reads that only serve them; a failed read collects the cluster as before.
+Then one wildcard `VsanPerfQueryPerf` call per entity type in scope per vSAN
 cluster, in this order: core (DOM owner, DOM client, pNIC), the cluster,
 host, disk and VM tiers, so a deadline cut loses the tail first (the VM
 types, which also run on a cadence). Calls per cycle on the lab (one 5-host
@@ -142,6 +152,24 @@ type calls run one at a time across all workers.
 
 **Learned types.** A type a cluster does not offer (`NotSupported`, or an
 `InvalidArgument` naming `entityRefId`) is not queried there for 24 hours.
+1.2.1 (design D8, as amended for build 24): any other parsed vSphere fault
+(HTTP 500 with a fault body) of a type, core types included
+(devel 9.0.2: `vsan-pnic-net` faults `SystemError` "no such column:
+pfcCountRaw" on an OSA 9.0 cluster, and the three RDT types "no such column:
+kaReset"), is counted (`required_calls_failed` or `optional_calls_failed`),
+named in `last_error` and WARNed at the first fault; after three faulting
+cycles in a row (VM types: VM runs), each counted only when the cluster ended
+OK with at least one call answered, the type is skipped on that cluster for
+24 hours with the same re-probe spread (INFO once), and `last_error` reads
+`none` again from the next cycle. An answer between faults starts the count
+over. `ioinsight` is never learned. A host loses that type's keys while it
+is skipped. Not type faults: an HTTP error without a vSphere fault body, a
+connection reset, a read error or an over-cap answer (a core type fails the
+cluster, as in 1.2.0; nothing is learned), and `masternotfound`, which fails
+the cluster on any type and ends its calls for the cycle. A cluster whose
+every type is learned-skipped makes no perf call: it counts as collected,
+with a WARN once per refresh and `last_error` "cluster <moid>: all types
+learned-skipped; no perf call this cycle".
 Build 19 (design v3 Q5): the nine types that fault that way on every ref
 form on 9.1.1 (listed under `optional_calls_failed`) are optional types
 instead: each fault counts in `optional_calls_failed`, and the type is
@@ -167,6 +195,25 @@ only the newest). The first cycle after an install or upgrade therefore
 pushes up to two buckets per series; later cycles normally one. Marks are
 per entity and metric, held in memory (a restart may push the newest
 buckets again, which overwrites them with themselves).
+
+## Bundled content
+
+Installed with the pak (1.2.1), on VMWARE ClusterComputeResource, acting on
+`vSAN Perf|Performance Service|enabled`:
+
+- Symptom **"[VCF Content Factory] vSAN Performance Service Disabled"**
+  (VMWARE ClusterComputeResource, metric static
+  `vSAN Perf|Performance Service|enabled` `< 1`, WARNING, wait 2 cycles,
+  cancel 1).
+- Alert **"[VCF Content Factory] vSAN Performance Service disabled on
+  cluster (vSAN Perf collection paused)"** (ClusterComputeResource,
+  WARNING, impact risk, type Storage / Configuration, wait 1, cancel 1).
+- Recommendation **"[VCF Content Factory] vSAN Enable Performance
+  Service"** (vSphere Client: cluster > Configure > vSAN > Services >
+  Performance Service > Edit / Turn On).
+
+Whether the alert cancels when the values stop (pak removed, cluster taken
+out of scope) rather than on a 1 is unverified (design D6).
 
 ## Where keys land
 
@@ -2469,6 +2516,21 @@ Lands on: ClusterComputeResource, only when the id is the queried cluster's vSAN
 |`vSAN Perf\|Compute Remote DOM Client\|throughputReadBytesPerSec`|`throughputRead`|Read throughput|bytes/s|none|all|
 |`vSAN Perf\|Compute Remote DOM Client\|throughputWriteBytesPerSec`|`throughputWrite`|Write throughput|bytes/s|none|all|
 
+## Keys on VMWARE ClusterComputeResource: Performance Service (always on; 1 key)
+
+1.2.1 (design D4). Read with one `VsanClusterGetConfig` per in-scope
+cluster per cycle and pushed every cycle the read is definite, onto the
+cluster's ClusterComputeResource, whatever `tier_cluster` says (the
+cluster list is read whenever a cluster is in scope). Not pushed when the
+read fails (no guess). A cluster with no ClusterComputeResource object of
+this vCenter counts in `clusters_unresolved`. One value per cluster per
+cycle, stamped with the cycle time. Not a Performance Service metric, so it
+is the same under both scopes. A symptom on `< 1` cancels on the next 1.
+
+|Ops stat key|Source|Meaning|Unit|Transform|Scope|
+|---|---|---|---|---|---|
+|`vSAN Perf\|Performance Service\|enabled`|`VsanClusterGetConfig` `perfsvcConfig.enabled`|vSAN Performance Service enabled: 1 when `perfsvcConfig.enabled` is true, 0 when `perfsvcConfig` is absent or false|none (flag)|none|both|
+
 ## Keys on VMWARE HostSystem: disk tier (`tier_disk`, 31 keys, 126 under `all`, default off)
 
 Instanced by the vSAN disk uuid (`ESA Disk Layer:52d171f6-...`), on the host
@@ -2803,10 +2865,10 @@ the service returns under `all` (identical values) are not keys.
 Every pak line goes through the adapter's own logger, into
 `VsanPerfAdapter_<instance id>.log` on the collector. INFO every cycle,
 including a failed one: one summary line, `cycle <n> summary: clusters
-ok=.. failed=.. timed_out=.. of ..; perf calls=..; series pushed=.. (core ..
+ok=.. failed=.. timed_out=.. perfsvc_disabled=.. of ..; perf calls=..; series pushed=.. (core ..
 host .. cluster .. disk .. vm ..; .. already pushed); unresolved hosts=..
 clusters=.. disks=.. vms=.. vdisks=..; unparsed=..; learned skips=..;
-optional calls failed=..; push batches ok=.. failed=..; scope=dashboard|all; <s> s` (the tiers
+required calls failed=..; optional calls failed=..; push batches ok=.. failed=..; scope=dashboard|all; <s> s` (the tiers
 and unresolved classes listed are the ones switched on),
 with `; FAILED: <reason>` on a failed cycle. WARN: a failed cluster (fault class and
 key), an optional type's failure (once per cluster and type per refresh),
@@ -2818,7 +2880,13 @@ build does not know (configure), and (build 19) remote (HCI Mesh) ids that
 are not objects of the queried cluster (once per Ops host map refresh). INFO
 since build 19: once per type per day, the names of the labels the service
 returned that the scope's catalog lacks (names only, never an id); a Q5
-type learned after three faults. With
+type learned after three faults. 1.2.1: INFO once on each Performance
+Service transition per cluster ("Performance Service disabled on <moid>
+(<name>); perf collection skipped", "... enabled; collecting"), and a type
+learned after three faulting cycles; WARN at a core or optional type's first
+server fault, and once per cluster per refresh when `VsanClusterGetConfig`
+fails; `PERF perfsvc` (`state=enabled|disabled|unknown`, ms, fault) with
+timing logging on. With
 **Performance timing logging** on (re-read every cycle, so a change takes
 effect on the next cycle without a restart), `key=value` lines prefixed `PERF call`,
 `PERF cluster`, `PERF pool`, `PERF push`, `PERF inventory`, `PERF tier`,

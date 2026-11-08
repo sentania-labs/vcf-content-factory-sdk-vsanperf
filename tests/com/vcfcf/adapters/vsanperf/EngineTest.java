@@ -96,6 +96,41 @@ public final class EngineTest {
             return answer(cluster, type, scope);
         }
 
+        /**
+         * 1.2.1: cluster MoRef to its {@code VsanClusterGetConfig} answer, a
+         * body (parsed by the client's own parser) or an exception. A cluster
+         * without an entry answers unknown ({@code null}), as 1.2.0 fakes do;
+         * a configured read takes 1 ms of simulated time ({@code delays} key
+         * {@code <cluster>|config}).
+         */
+        final Map<String, Object> configs = new ConcurrentHashMap<>();
+        final Map<String, AtomicInteger> configCalls = new ConcurrentHashMap<>();
+
+        @Override public Boolean perfsvcEnabled(String cluster, long timeoutMs) throws IOException {
+            Object a = configs.get(cluster);
+            if (a == null) return null;
+            configCalls.computeIfAbsent(cluster, x -> new AtomicInteger()).incrementAndGet();
+            Long d = delays.get(cluster + "|config");
+            T.CLOCK.addAndGet(d != null ? d : 1L);
+            if (a instanceof IOException) throw (IOException) a;
+            if (a instanceof RuntimeException) throw (RuntimeException) a;
+            return VsanJsonClient.perfsvcEnabled((String) a);
+        }
+
+        int configCalls(String cluster) {
+            AtomicInteger n = configCalls.get(cluster);
+            return n == null ? 0 : n.get();
+        }
+
+        /** Perf calls made on {@code cluster}, every type. */
+        int clusterCalls(String cluster) {
+            int n = 0;
+            for (Map.Entry<String, AtomicInteger> e : calls.entrySet()) {
+                if (e.getKey().startsWith(cluster + "|")) n += e.getValue().get();
+            }
+            return n;
+        }
+
         /** Build 20: every call in the order made ("cluster|type"). */
         final List<String> order = Collections.synchronizedList(new ArrayList<>());
 
@@ -271,8 +306,9 @@ public final class EngineTest {
         T.eq(780, r.seriesPushed, "390 series x the window's two buckets (v2 one bucket rule)");
         T.eq(0, r.hostsUnresolved, "all 5 hosts resolved");
         T.eq(5, ops.pushed.size(), "5 HostSystem resources");
-        T.eq(0, ops.clusterGets.get(), "no cluster list read with the cluster tier off");
-        T.eq(17, r.metrics().size(), "seventeen self-metrics");
+        T.eq(1, ops.clusterGets.get(), "1.2.1 D7: the cluster list is read with the cluster "
+                + "tier off (the Performance Service state lands there)");
+        T.eq(19, r.metrics().size(), "nineteen self-metrics");
         T.eq("none", r.lastErrorProperty(), "no error");
         T.check(r.perfCallsPerSecond > 0, "call rate from the perf phase");
         T.check(r.perfCallMsAvg >= 0, "avg call ms");
@@ -768,7 +804,7 @@ public final class EngineTest {
         T.eq(0, ops.calls.size(), "no push");
         T.eq(0, vc.calls.size(), "no perf call");
         T.eq(thrown.getMessage(), got.get(CycleReport.LAST_ERROR), "last_error set");
-        T.eq(18, got.size(), "17 self-metrics and last_error");
+        T.eq(20, got.size(), "19 self-metrics and last_error");
         T.eq(0.0, got.get("Collection|clusters_ok"), "nothing collected");
         T.check(!thrown.getMessage().contains("svc") && !thrown.getMessage().contains("tok-"),
                 "credential-free");
@@ -795,9 +831,10 @@ public final class EngineTest {
 
         CycleReport.run(e, in(30_000), null);
         String healthy = log.text();
-        T.check(healthy.contains("INFO cycle 1 summary: clusters ok=1 failed=0 timed_out=0 of 1; "
-                + "perf calls=3; series pushed=780 (core 780; 0 already pushed); unresolved "
-                + "hosts=0 clusters=0; unparsed=0; learned skips=0; optional calls failed=0; push batches ok="),
+        T.check(healthy.contains("INFO cycle 1 summary: clusters ok=1 failed=0 timed_out=0 "
+                + "perfsvc_disabled=0 of 1; perf calls=3; series pushed=780 (core 780; 0 already "
+                + "pushed); unresolved hosts=0 clusters=0; unparsed=0; learned skips=0; required "
+                + "calls failed=0; optional calls failed=0; push batches ok="),
                 "summary line: " + healthy);
         T.check(healthy.contains(" s\n"), "summary carries seconds");
         T.eq(0, log.count("PERF "), "flag off: no PERF line");
