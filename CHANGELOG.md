@@ -2,6 +2,15 @@
 
 ## 1.2.1.24 (Unreleased)
 
+- ci: the release workflow pins sdk-buildkit 1.0.27 and fetches the SDK jar
+  under its version-and-build name, `vrops-adapters-sdk-9.0.2.0.25137845.jar`
+  (formerly `vrops-adapters-sdk-2.2.jar`; same bytes, same sha256), from the
+  runtime repo's rename commit. With this kit the pak's `conf/version.txt`
+  records the jar it was compiled against (`Adapter-Version-Ref=9.0.2.0.25137845`,
+  was `N/A`), and the overview pages HTML-escape the pak name and
+  description. The build instructions give the real appliance path of the
+  jar, `/usr/lib/vmware-vcops/common/lib/vrops-adapters-sdk.jar`; the path
+  given before exists on no appliance.
 - fix(adapter): build 23 review B1. A vSAN endpoint outage could make every
   type learned-skipped for 24 h while the cluster reported OK with
   `last_error` none (each faulting cycle struck every type, even when every
